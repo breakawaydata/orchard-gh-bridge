@@ -7,10 +7,11 @@ import (
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
+	"golang.org/x/sync/errgroup"
+
 	brdg "github.com/breakawaydata/orchard-gh-bridge/bridge"
 	"github.com/breakawaydata/orchard-gh-bridge/config"
 	"github.com/breakawaydata/orchard-gh-bridge/orchard"
-	"golang.org/x/sync/errgroup"
 )
 
 // Manager orchestrates multiple scale set bridges sharing a global capacity pool.
@@ -114,7 +115,7 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 	if err != nil {
 		return fmt.Errorf("creating message session for %s: %w", ssCfg.Name, err)
 	}
-	defer sessionClient.Close(ctx)
+	defer sessionClient.Close(ctx) //nolint:errcheck
 
 	// Determine max runners for this scale set
 	maxRunners := m.cfg.MaxVMs

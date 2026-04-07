@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/actions/scaleset"
+
 	"github.com/breakawaydata/orchard-gh-bridge/config"
 	"github.com/breakawaydata/orchard-gh-bridge/orchard"
 )
@@ -30,13 +31,13 @@ type Bridge struct {
 }
 
 type Config struct {
-	ScaleSetName string
-	ScaleSetID   int
-	VMConfig     config.VMConfig
+	ScaleSetName  string
+	ScaleSetID    int
+	VMConfig      config.VMConfig
 	OrchardClient orchard.Client
-	GHClient     *scaleset.Client
-	Capacity     *Capacity
-	Logger       *slog.Logger
+	GHClient      *scaleset.Client
+	Capacity      *Capacity
+	Logger        *slog.Logger
 }
 
 func New(cfg Config) *Bridge {
