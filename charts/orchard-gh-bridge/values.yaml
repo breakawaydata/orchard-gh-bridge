@@ -49,6 +49,13 @@ resources: {}
   #   cpu: 100m
   #   memory: 128Mi
 
+extraEnv: []
+  # - name: ORCHARD_GH_BRIDGE_ORCHARD_PASSWORD
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: my-secret
+  #       key: token
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
