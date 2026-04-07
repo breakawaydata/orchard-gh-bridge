@@ -1,0 +1,19 @@
+apiVersion: v2
+name: orchard-gh-bridge
+description: Bridges GitHub Actions Runner Scale Sets with Orchard/Tart macOS VMs for ephemeral self-hosted runners
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/breakawaydata/orchard-gh-bridge
+sources:
+  - https://github.com/breakawaydata/orchard-gh-bridge
+maintainers:
+  - name: BreakAwayData
+keywords:
+  - github-actions
+  - macos
+  - self-hosted-runners
+  - orchard
+  - tart
+  - apple-silicon
+kubeVersion: ">=1.24"

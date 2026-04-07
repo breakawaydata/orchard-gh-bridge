@@ -1,0 +1,112 @@
+replicaCount: 1
+
+image:
+  # Override registry to use a pull-through cache or private mirror
+  # e.g. "my-cache.internal" → my-cache.internal/breakawaydata/orchard-gh-bridge
+  registry: ghcr.io
+  repository: breakawaydata/orchard-gh-bridge
+  pullPolicy: IfNotPresent
+  tag: ""  # defaults to appVersion
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 65534
+
+securityContext:
+  capabilities:
+    drop: [ALL]
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65534
+
+service:
+  type: ClusterIP
+  port: 8080
+
+metrics:
+  enabled: false
+  port: 9090
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+resources: {}
+  # limits:
+  #   cpu: 500m
+  #   memory: 256Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# --- Application Config ---
+# Rendered into a ConfigMap and mounted at /config/config.yaml
+config:
+  logLevel: info
+  maxVMs: 4
+  orchard:
+    address: "http://orchard-controller:6120"
+    username: "bootstrap-admin"
+    insecure: false
+  github:
+    # App auth (set appID/installationID here, private key via secret)
+    appID: 0
+    installationID: 0
+    # PAT auth (set via secret)
+    # token is injected via env from secret
+  scaleSets: []
+    # - name: macos-sequoia-xcode-16
+    #   githubConfigURL: https://github.com/your-org
+    #   labels: [self-hosted, macOS, ARM64]
+    #   runnerGroup: default
+    #   maxRunners: 0
+    #   vm:
+    #     image: ghcr.io/cirruslabs/macos-sequoia-xcode:16
+    #     cpu: 4
+    #     memory: 8192
+  health:
+    port: 8080
+  metrics:
+    enabled: false
+    port: 9090
+
+# --- Secrets ---
+# Option 1: Reference a pre-created Kubernetes Secret
+# The secret should contain keys matching env var names:
+#   ORCHARD_GH_BRIDGE_GITHUB_TOKEN        (for PAT auth)
+#   ORCHARD_GH_BRIDGE_GITHUB_PRIVATE_KEY  (for App auth)
+#   ORCHARD_GH_BRIDGE_ORCHARD_PASSWORD
+existingSecret: ""
+
+# Option 2: External Secrets Operator
+externalSecret:
+  enabled: false
+  refreshInterval: 1h
+  secretStoreRef:
+    name: ""
+    kind: ClusterSecretStore
+  target:
+    name: ""  # defaults to fullname-secrets
+  data: []
+    # - secretKey: ORCHARD_GH_BRIDGE_GITHUB_PRIVATE_KEY
+    #   remoteRef:
+    #     key: path/to/secret
+    #     property: private_key
+    # - secretKey: ORCHARD_GH_BRIDGE_ORCHARD_PASSWORD
+    #   remoteRef:
+    #     key: path/to/secret
+    #     property: token

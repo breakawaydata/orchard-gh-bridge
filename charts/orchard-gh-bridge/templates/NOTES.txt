@@ -1,0 +1,22 @@
+orchard-gh-bridge has been deployed!
+
+To check the status:
+  kubectl get pods -l "app.kubernetes.io/name={{ include "orchard-gh-bridge.name" . }},app.kubernetes.io/instance={{ .Release.Name }}"
+
+To view logs:
+  kubectl logs -l "app.kubernetes.io/name={{ include "orchard-gh-bridge.name" . }}" -f
+
+To check health:
+  kubectl port-forward svc/{{ include "orchard-gh-bridge.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl http://localhost:{{ .Values.service.port }}/healthz
+  curl http://localhost:{{ .Values.service.port }}/readyz
+
+{{- if not .Values.config.scaleSets }}
+
+WARNING: No scale sets are configured. Update config.scaleSets in your values to start bridging GitHub Actions to Orchard.
+{{- end }}
+
+{{- if and (not .Values.existingSecret) (not .Values.externalSecret.enabled) }}
+
+WARNING: No secret is configured. Set existingSecret or enable externalSecret to provide GitHub and Orchard credentials.
+{{- end }}
