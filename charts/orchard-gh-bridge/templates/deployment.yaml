@@ -49,6 +49,10 @@ spec:
               containerPort: {{ .Values.metrics.port }}
               protocol: TCP
             {{- end }}
+          {{- with .Values.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           envFrom:
             {{- if or .Values.existingSecret .Values.externalSecret.enabled }}
             - secretRef:
