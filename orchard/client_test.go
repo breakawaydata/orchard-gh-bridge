@@ -43,7 +43,7 @@ func TestCreateVM(t *testing.T) {
 
 		vm.Status = VMStatusCreating
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(vm)
+		_ = json.NewEncoder(w).Encode(vm)
 	}))
 
 	vm, err := c.CreateVM(context.Background(), &VM{
@@ -64,7 +64,7 @@ func TestGetVM(t *testing.T) {
 		if r.URL.Path != "/v1/vms/my-vm" {
 			t.Errorf("path = %q, want /v1/vms/my-vm", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(VM{Name: "my-vm", Status: VMStatusRunning})
+		_ = json.NewEncoder(w).Encode(VM{Name: "my-vm", Status: VMStatusRunning})
 	}))
 
 	vm, err := c.GetVM(context.Background(), "my-vm")
@@ -92,7 +92,7 @@ func TestListVMs(t *testing.T) {
 		if r.URL.Path != "/v1/vms" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode([]VM{
+		_ = json.NewEncoder(w).Encode([]VM{
 			{Name: "vm-1", Status: VMStatusRunning},
 			{Name: "vm-2", Status: VMStatusStopped},
 		})
@@ -135,7 +135,7 @@ func TestListWorkers(t *testing.T) {
 		if r.URL.Path != "/v1/workers" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode([]Worker{
+		_ = json.NewEncoder(w).Encode([]Worker{
 			{Name: "worker-1"},
 		})
 	}))
@@ -152,7 +152,7 @@ func TestListWorkers(t *testing.T) {
 func TestAPIError(t *testing.T) {
 	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(apiError{Message: "worker at capacity"})
+		_ = json.NewEncoder(w).Encode(apiError{Message: "worker at capacity"})
 	}))
 
 	_, err := c.CreateVM(context.Background(), &VM{Name: "fail"})

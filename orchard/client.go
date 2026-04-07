@@ -62,7 +62,7 @@ func (c *httpClient) CreateVM(ctx context.Context, vm *VM) (*VM, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating VM: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return nil, c.parseError(resp, "creating VM")
@@ -80,7 +80,7 @@ func (c *httpClient) GetVM(ctx context.Context, name string) (*VM, error) {
 	if err != nil {
 		return nil, fmt.Errorf("getting VM: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("VM %q: %w", name, ErrNotFound)
@@ -101,7 +101,7 @@ func (c *httpClient) ListVMs(ctx context.Context) ([]VM, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing VMs: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseError(resp, "listing VMs")
@@ -119,7 +119,7 @@ func (c *httpClient) DeleteVM(ctx context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("deleting VM: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil // already gone
@@ -135,7 +135,7 @@ func (c *httpClient) ListWorkers(ctx context.Context) ([]Worker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing workers: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseError(resp, "listing workers")
@@ -153,7 +153,7 @@ func (c *httpClient) Ping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("orchard ping: status %d", resp.StatusCode)
 	}
