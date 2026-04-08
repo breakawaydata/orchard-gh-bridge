@@ -168,7 +168,7 @@ func (m *Manager) registerScaleSet(ctx context.Context, ghClient *scaleset.Clien
 	}
 
 	existing, err := ghClient.GetRunnerScaleSet(ctx, runnerGroupID, ssCfg.Name)
-	if err == nil {
+	if err == nil && existing != nil {
 		logger.Info("found existing scale set", "id", existing.ID)
 		return existing, nil
 	}
