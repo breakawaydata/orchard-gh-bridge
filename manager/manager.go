@@ -60,7 +60,7 @@ func (m *Manager) defaultNewGHClient(configURL string) (*scaleset.Client, error)
 	return scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
 		GitHubConfigURL: configURL,
 		GitHubAppAuth: scaleset.GitHubAppAuth{
-			ClientID:       fmt.Sprintf("Iv1.%d", gh.AppID),
+			ClientID:       fmt.Sprintf("%d", gh.AppID),
 			InstallationID: gh.InstallationID,
 			PrivateKey:     pem,
 		},
