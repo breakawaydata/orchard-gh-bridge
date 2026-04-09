@@ -7,7 +7,7 @@ import (
 
 func TestVMName(t *testing.T) {
 	name := VMName("macos-sequoia-xcode-16.3")
-	if !strings.HasPrefix(name, "gha-macos-sequoia-xcode-16-3-") {
+	if !strings.HasPrefix(name, "gha-orchard-macos-sequoia-xcode-16-3-") {
 		t.Errorf("unexpected name: %s", name)
 	}
 	if len(name) > 63 {
@@ -21,7 +21,7 @@ func TestVMName_LongName(t *testing.T) {
 	if len(name) > 63 {
 		t.Errorf("name too long: %d chars", len(name))
 	}
-	if !strings.HasPrefix(name, "gha-") {
+	if !strings.HasPrefix(name, "gha-orchard-") {
 		t.Errorf("missing prefix: %s", name)
 	}
 }

@@ -91,12 +91,12 @@ func TestCapacity_Basic(t *testing.T) {
 
 func TestCleanup_ReapsStopped(t *testing.T) {
 	mock := newMockOrchard()
-	mock.vms["gha-test-1"] = &orchard.VM{
-		Name:   "gha-test-1",
+	mock.vms["gha-orchard-test-1"] = &orchard.VM{
+		Name:   "gha-orchard-test-1",
 		Status: orchard.VMStatusStopped,
 	}
-	mock.vms["gha-test-2"] = &orchard.VM{
-		Name:   "gha-test-2",
+	mock.vms["gha-orchard-test-2"] = &orchard.VM{
+		Name:   "gha-orchard-test-2",
 		Status: orchard.VMStatusRunning,
 	}
 

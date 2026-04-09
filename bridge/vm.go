@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const vmNamePrefix = "gha-"
+const vmNamePrefix = "gha-orchard-"
 
 var nonAlphanumHyphen = regexp.MustCompile(`[^a-z0-9-]`)
 
