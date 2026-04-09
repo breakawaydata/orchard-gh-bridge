@@ -239,26 +239,33 @@ func (m *Manager) registerScaleSet(ctx context.Context, ghClient *scaleset.Clien
 		runnerGroupID = rg.ID
 	}
 
-	existing, err := ghClient.GetRunnerScaleSet(ctx, runnerGroupID, ssCfg.Name)
-	if err == nil && existing != nil {
-		logger.Info("found existing scale set", "id", existing.ID)
-		return existing, nil
-	}
-
-	// Create new scale set
 	labels := make([]scaleset.Label, len(ssCfg.Labels))
 	for i, l := range ssCfg.Labels {
 		labels[i] = scaleset.Label{Name: l}
 	}
 
-	ss, err := ghClient.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{
+	desired := &scaleset.RunnerScaleSet{
 		Name:          ssCfg.Name,
 		RunnerGroupID: runnerGroupID,
 		Labels:        labels,
 		RunnerSetting: scaleset.RunnerSetting{
 			DisableUpdate: true,
 		},
-	})
+	}
+
+	// If the scale set already exists, update it to sync labels
+	existing, err := ghClient.GetRunnerScaleSet(ctx, runnerGroupID, ssCfg.Name)
+	if err == nil && existing != nil {
+		updated, err := ghClient.UpdateRunnerScaleSet(ctx, existing.ID, desired)
+		if err != nil {
+			return nil, fmt.Errorf("updating scale set %s: %w", ssCfg.Name, err)
+		}
+		logger.Info("updated existing scale set", "id", updated.ID)
+		return updated, nil
+	}
+
+	// Create new scale set
+	ss, err := ghClient.CreateRunnerScaleSet(ctx, desired)
 	if err != nil {
 		return nil, fmt.Errorf("creating scale set: %w", err)
 	}
