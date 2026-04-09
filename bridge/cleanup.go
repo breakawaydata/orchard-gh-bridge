@@ -95,7 +95,29 @@ func (c *Cleanup) sweep(ctx context.Context) {
 	// Reconcile capacity with actual managed VM count
 	c.capacity.Reconcile(managedCount)
 
+	// Refresh max capacity from current workers
+	c.refreshMaxCapacity(ctx)
+
 	if deleted > 0 {
 		c.logger.Info("cleanup sweep complete", "deleted", deleted, "remaining", managedCount)
+	}
+}
+
+const resourceTartVMs = "org.cirruslabs.tart-vms"
+
+func (c *Cleanup) refreshMaxCapacity(ctx context.Context) {
+	workers, err := c.orchardClient.ListWorkers(ctx)
+	if err != nil {
+		c.logger.Error("failed to list workers for capacity refresh", "error", err)
+		return
+	}
+	var total int
+	for _, w := range workers {
+		if n, ok := w.Resources[resourceTartVMs]; ok {
+			total += int(n)
+		}
+	}
+	if total > 0 {
+		c.capacity.SetMax(total)
 	}
 }

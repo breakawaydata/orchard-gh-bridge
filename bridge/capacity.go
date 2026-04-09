@@ -60,3 +60,10 @@ func (c *Capacity) Reconcile(actual int) {
 	defer c.mu.Unlock()
 	c.current = min(actual, c.max)
 }
+
+// SetMax updates the maximum capacity (e.g. when workers come/go).
+func (c *Capacity) SetMax(max int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.max = max
+}

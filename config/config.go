@@ -83,9 +83,7 @@ func applyDefaults(cfg *Config) {
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
-	if cfg.MaxVMs == 0 {
-		cfg.MaxVMs = 4
-	}
+	// MaxVMs 0 means auto-detect from connected workers
 	if cfg.Orchard.Username == "" {
 		cfg.Orchard.Username = "bootstrap-admin"
 	}
@@ -159,10 +157,6 @@ func (c *Config) Validate() error {
 		if ss.VM.Image == "" {
 			errs = append(errs, fmt.Sprintf("scaleSets[%d].vm.image is required", i))
 		}
-	}
-
-	if c.MaxVMs < 1 {
-		errs = append(errs, "maxVMs must be at least 1")
 	}
 
 	if len(errs) > 0 {

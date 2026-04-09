@@ -83,8 +83,8 @@ scaleSets:
 	if cfg.LogLevel != "info" {
 		t.Errorf("LogLevel = %q, want info", cfg.LogLevel)
 	}
-	if cfg.MaxVMs != 4 {
-		t.Errorf("MaxVMs = %d, want 4", cfg.MaxVMs)
+	if cfg.MaxVMs != 0 {
+		t.Errorf("MaxVMs = %d, want 0 (auto-detect)", cfg.MaxVMs)
 	}
 	if cfg.Health.Port != 8080 {
 		t.Errorf("Health.Port = %d, want 8080", cfg.Health.Port)

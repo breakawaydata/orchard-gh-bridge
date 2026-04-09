@@ -27,15 +27,46 @@ type Manager struct {
 }
 
 func New(cfg *config.Config, orchardClient orchard.Client, logger *slog.Logger) (*Manager, error) {
+	mgrLogger := logger.With("component", "manager")
+
+	maxVMs := cfg.MaxVMs
+	if maxVMs == 0 {
+		total, err := discoverCapacity(context.Background(), orchardClient)
+		if err != nil {
+			return nil, fmt.Errorf("discovering worker capacity: %w", err)
+		}
+		if total == 0 {
+			return nil, fmt.Errorf("no workers with tart-vms capacity found; set maxVMs explicitly or connect a worker")
+		}
+		maxVMs = total
+		mgrLogger.Info("auto-detected capacity from workers", "maxVMs", maxVMs)
+	}
+
 	m := &Manager{
 		cfg:           cfg,
 		orchardClient: orchardClient,
-		logger:        logger.With("component", "manager"),
-		capacity:      brdg.NewCapacity(cfg.MaxVMs),
+		logger:        mgrLogger,
+		capacity:      brdg.NewCapacity(maxVMs),
 	}
 
 	m.newGHClient = m.defaultNewGHClient
 	return m, nil
+}
+
+const resourceTartVMs = "org.cirruslabs.tart-vms"
+
+func discoverCapacity(ctx context.Context, client orchard.Client) (int, error) {
+	workers, err := client.ListWorkers(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var total int
+	for _, w := range workers {
+		if n, ok := w.Resources[resourceTartVMs]; ok {
+			total += int(n)
+		}
+	}
+	return total, nil
 }
 
 func (m *Manager) defaultNewGHClient(configURL string) (*scaleset.Client, error) {
