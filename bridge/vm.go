@@ -44,9 +44,11 @@ export ACTIONS_RUNNER_INPUT_JITCONFIG="%s"
 
 source ~/.zprofile
 
-# Install Docker and Docker Compose via Homebrew
-brew install docker docker-compose colima
-colima start --memory 4 --cpu 2
+# Install Docker Desktop
+brew install --cask docker
+open -a Docker
+# Wait for Docker to be ready
+while ! docker info &>/dev/null; do sleep 2; done
 
 # Download the latest GitHub Actions runner to avoid version deprecation.
 DOWNLOAD_URL=$(curl -sS 'https://api.github.com/repos/actions/runner/releases/latest' \
