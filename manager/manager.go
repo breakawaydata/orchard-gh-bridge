@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -25,6 +26,9 @@ type Manager struct {
 	// newGHClient creates a scaleset client for the given config URL.
 	// Extracted for testing.
 	newGHClient func(configURL string) (*scaleset.Client, error)
+
+	bridgesMu sync.Mutex
+	bridges   []*brdg.Bridge
 }
 
 func New(cfg *config.Config, orchardClient orchard.Client, logger *slog.Logger) (*Manager, error) {
@@ -119,6 +123,13 @@ func (m *Manager) Run(ctx context.Context) error {
 
 	// Start cleanup goroutine
 	cleanup := brdg.NewCleanup(m.orchardClient, m.capacity, runnerRemover, m.logger)
+	cleanup.SetOnVMCleaned(func(vmName string) {
+		m.bridgesMu.Lock()
+		defer m.bridgesMu.Unlock()
+		for _, b := range m.bridges {
+			b.PurgeActiveVM(vmName)
+		}
+	})
 	g.Go(func() error {
 		cleanup.Run(ctx)
 		return nil
@@ -215,6 +226,10 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 		Capacity:      m.capacity,
 		Logger:        m.logger,
 	})
+
+	m.bridgesMu.Lock()
+	m.bridges = append(m.bridges, b)
+	m.bridgesMu.Unlock()
 
 	// Run the listener (blocks until context cancelled)
 	logger.Info("listening for jobs", "maxRunners", maxRunners)

@@ -114,6 +114,43 @@ func TestCleanup_ReapsStopped(t *testing.T) {
 	}
 }
 
+func TestCleanup_NotifiesBridgeOnReap(t *testing.T) {
+	mock := newMockOrchard()
+	vmName := "gha-orchard-test-stale"
+	mock.vms[vmName] = &orchard.VM{
+		Name:   vmName,
+		Status: orchard.VMStatusFailed,
+	}
+
+	cap := NewCapacity(4)
+	cap.TryAcquire(1)
+
+	// Simulate a bridge tracking this VM as active
+	b := New(Config{
+		ScaleSetName:  "test",
+		OrchardClient: mock,
+		Capacity:      cap,
+		Logger:        testLogger(),
+	})
+	b.mu.Lock()
+	b.activeVMs[vmName] = vmName
+	b.mu.Unlock()
+
+	if b.ActiveVMCount() != 1 {
+		t.Fatalf("activeVMs = %d, want 1", b.ActiveVMCount())
+	}
+
+	cleanup := NewCleanup(mock, cap, nil, testLogger())
+	cleanup.SetOnVMCleaned(func(name string) {
+		b.PurgeActiveVM(name)
+	})
+	cleanup.sweep(context.Background())
+
+	if b.ActiveVMCount() != 0 {
+		t.Errorf("activeVMs = %d, want 0 (stale VM should be purged)", b.ActiveVMCount())
+	}
+}
+
 func TestCleanup_IgnoresUnmanaged(t *testing.T) {
 	mock := newMockOrchard()
 	mock.vms["unmanaged"] = &orchard.VM{

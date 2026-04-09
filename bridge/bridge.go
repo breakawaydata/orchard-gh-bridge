@@ -162,6 +162,18 @@ func (b *Bridge) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCo
 	return nil
 }
 
+// PurgeActiveVM removes a VM from the active tracking map.
+// Called by Cleanup when a VM is reaped externally (e.g. failed/stopped).
+func (b *Bridge) PurgeActiveVM(vmName string) {
+	b.mu.Lock()
+	_, had := b.activeVMs[vmName]
+	delete(b.activeVMs, vmName)
+	b.mu.Unlock()
+	if had {
+		b.logger.Info("purged stale VM from active tracking", "vm", vmName)
+	}
+}
+
 // ActiveVMCount returns the number of active VMs tracked by this bridge.
 func (b *Bridge) ActiveVMCount() int {
 	b.mu.Lock()

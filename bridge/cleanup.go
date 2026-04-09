@@ -23,6 +23,7 @@ type Cleanup struct {
 	orchardClient orchard.Client
 	capacity      *Capacity
 	runnerRemover RunnerRemover
+	onVMCleaned   func(vmName string)
 	logger        *slog.Logger
 	interval      time.Duration
 	maxAge        time.Duration
@@ -37,6 +38,12 @@ func NewCleanup(orchardClient orchard.Client, capacity *Capacity, runnerRemover 
 		interval:      DefaultCleanupInterval,
 		maxAge:        DefaultMaxVMAge,
 	}
+}
+
+// SetOnVMCleaned registers a callback invoked after a VM is reaped.
+// Used by the manager to notify bridges so they can purge stale activeVM entries.
+func (c *Cleanup) SetOnVMCleaned(fn func(vmName string)) {
+	c.onVMCleaned = fn
 }
 
 // Run starts the cleanup loop. Blocks until context is cancelled.
@@ -95,6 +102,9 @@ func (c *Cleanup) sweep(ctx context.Context) {
 				continue
 			}
 			c.removeRunner(ctx, vm.Name)
+			if c.onVMCleaned != nil {
+				c.onVMCleaned(vm.Name)
+			}
 			deleted++
 			managedCount--
 		}
