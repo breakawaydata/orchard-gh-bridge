@@ -42,17 +42,14 @@ set -euo pipefail
 
 export ACTIONS_RUNNER_INPUT_JITCONFIG="%s"
 
-# Always download the latest supported runner to avoid version deprecation.
-# The pre-installed /opt/runner in Tart images may be outdated.
-RUNNER_VERSION="2.333.1"
-RUNNER_ARCH="osx-arm64"
-RUNNER_DIR="$HOME/actions-runner"
+# Download the latest GitHub Actions runner to avoid version deprecation.
+DOWNLOAD_URL=$(curl -sS 'https://api.github.com/repos/actions/runner/releases/latest' \
+  | grep -o '"browser_download_url": *"[^"]*actions-runner-osx-arm64-[0-9.]*\.tar\.gz"' \
+  | cut -d'"' -f4)
 
-mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
-curl -sL -o runner.tar.gz \
-  "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"
-tar xzf runner.tar.gz
-rm runner.tar.gz
+RUNNER_DIR="$HOME/actions-runner"
+rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
+curl -sL "$DOWNLOAD_URL" | tar xz
 
 ./run.sh
 `, jitConfig)
