@@ -44,11 +44,9 @@ export ACTIONS_RUNNER_INPUT_JITCONFIG="%s"
 
 source ~/.zprofile
 
-# Install Docker Desktop
-brew install --cask docker
-open -a Docker
-# Wait for Docker to be ready
-while ! docker info &>/dev/null; do sleep 2; done
+# Install Docker via Colima
+brew install colima docker docker-compose docker-buildx
+colima start --memory 4 --cpu 2
 
 # Download the latest GitHub Actions runner to avoid version deprecation.
 DOWNLOAD_URL=$(curl -sS 'https://api.github.com/repos/actions/runner/releases/latest' \
