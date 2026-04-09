@@ -47,6 +47,12 @@ func StartupScript(jitConfig string, dockerPort int) string {
 # stdin must be redirected: Orchard pipes the script to bash, and brew
 # would otherwise consume the remaining script lines from stdin.
 brew install docker docker-compose docker-buildx < /dev/null
+
+# Register Compose/Buildx as Docker CLI plugins (brew installs them outside
+# the default plugin search path).
+mkdir -p ~/.docker
+echo '{"cliPluginsExtraDirs":["/opt/homebrew/lib/docker/cli-plugins"]}' > ~/.docker/config.json
+
 DOCKER_HOST_IP=$(route -n get default | awk '/gateway:/ {print $2}')
 export DOCKER_HOST="tcp://${DOCKER_HOST_IP}:%d"
 `, dockerPort)

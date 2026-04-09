@@ -64,4 +64,7 @@ func TestStartupScript_DockerPort(t *testing.T) {
 	if !strings.Contains(script, "< /dev/null") {
 		t.Error("brew install must redirect stdin")
 	}
+	if !strings.Contains(script, "cliPluginsExtraDirs") {
+		t.Error("script should register docker CLI plugins")
+	}
 }
