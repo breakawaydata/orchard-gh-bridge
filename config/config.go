@@ -47,7 +47,6 @@ type VMConfig struct {
 	Image      string            `yaml:"image"`
 	CPU        uint64            `yaml:"cpu"`
 	Memory     uint64            `yaml:"memory"`
-	Nested     bool              `yaml:"nested"`
 	DockerPort int               `yaml:"dockerPort"`
 	Labels     map[string]string `yaml:"labels"`
 }

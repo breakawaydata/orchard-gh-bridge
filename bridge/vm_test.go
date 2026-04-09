@@ -35,7 +35,7 @@ func TestVMName_Unique(t *testing.T) {
 }
 
 func TestStartupScript(t *testing.T) {
-	script := StartupScript("abc123encoded", false, 0)
+	script := StartupScript("abc123encoded", 0)
 	if !strings.Contains(script, "abc123encoded") {
 		t.Error("script missing JIT config")
 	}
@@ -45,23 +45,13 @@ func TestStartupScript(t *testing.T) {
 	if !strings.HasPrefix(script, "#!/bin/bash") {
 		t.Error("script missing shebang")
 	}
-	if strings.Contains(script, "colima") {
-		t.Error("non-nested script should not install Docker")
-	}
-}
-
-func TestStartupScript_Nested(t *testing.T) {
-	script := StartupScript("abc123encoded", true, 0)
-	if !strings.Contains(script, "colima") {
-		t.Error("nested script should install Docker via Colima")
-	}
-	if !strings.Contains(script, "docker-buildx") {
-		t.Error("nested script should install docker-buildx")
+	if strings.Contains(script, "brew install") {
+		t.Error("script without dockerPort should not install anything")
 	}
 }
 
 func TestStartupScript_DockerPort(t *testing.T) {
-	script := StartupScript("abc123encoded", false, 2375)
+	script := StartupScript("abc123encoded", 2375)
 	if !strings.Contains(script, "DOCKER_HOST_IP=$(route -n get default") {
 		t.Error("script should auto-detect host gateway")
 	}
@@ -71,7 +61,7 @@ func TestStartupScript_DockerPort(t *testing.T) {
 	if !strings.Contains(script, "brew install docker") {
 		t.Error("script should install docker CLI")
 	}
-	if strings.Contains(script, "colima") {
-		t.Error("dockerPort script should not install colima")
+	if !strings.Contains(script, "< /dev/null") {
+		t.Error("brew install must redirect stdin")
 	}
 }
