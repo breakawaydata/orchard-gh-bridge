@@ -35,7 +35,7 @@ func TestVMName_Unique(t *testing.T) {
 }
 
 func TestStartupScript(t *testing.T) {
-	script := StartupScript("abc123encoded")
+	script := StartupScript("abc123encoded", false)
 	if !strings.Contains(script, "abc123encoded") {
 		t.Error("script missing JIT config")
 	}
@@ -44,5 +44,18 @@ func TestStartupScript(t *testing.T) {
 	}
 	if !strings.HasPrefix(script, "#!/bin/bash") {
 		t.Error("script missing shebang")
+	}
+	if strings.Contains(script, "colima") {
+		t.Error("non-nested script should not install Docker")
+	}
+}
+
+func TestStartupScript_Nested(t *testing.T) {
+	script := StartupScript("abc123encoded", true)
+	if !strings.Contains(script, "colima") {
+		t.Error("nested script should install Docker via Colima")
+	}
+	if !strings.Contains(script, "docker-buildx") {
+		t.Error("nested script should install docker-buildx")
 	}
 }

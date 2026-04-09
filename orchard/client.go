@@ -129,7 +129,7 @@ func toV1VM(vm *VM) v1.VM {
 		CPU:      vm.CPU,
 		Memory:   vm.Memory,
 		Headless: true,
-		Nested:   true,
+		Nested:   vm.Nested,
 		Username: "admin",
 		Password: "admin",
 		VMSpec: v1.VMSpec{
@@ -144,10 +144,11 @@ func toV1VM(vm *VM) v1.VM {
 			ScriptContent: vm.StartupScript.ScriptContent,
 		}
 	}
-	// NOTE: do NOT set result.Labels here. In Orchard, VM labels act as
-	// worker-label requirements — the scheduler only places the VM on workers
-	// whose labels are a superset. Our tracking labels (managed-by, scale-set)
-	// would prevent scheduling since the worker doesn't carry them.
+	// VM labels act as worker-affinity constraints in Orchard — the scheduler
+	// only places the VM on workers whose labels are a superset of the VM's.
+	if len(vm.Labels) > 0 {
+		result.Labels = v1.Labels(vm.Labels)
+	}
 	return result
 }
 
@@ -157,6 +158,7 @@ func fromV1VM(vm v1.VM) VM {
 		Image:         vm.Image,
 		CPU:           vm.CPU,
 		Memory:        vm.Memory,
+		Nested:        vm.Nested,
 		Status:        mapV1Status(vm.Status),
 		StatusMessage: vm.StatusMessage,
 		Worker:        vm.Worker,

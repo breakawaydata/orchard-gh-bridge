@@ -36,18 +36,24 @@ func VMName(scaleSetName string) string {
 
 // StartupScript generates the bash script injected into the Orchard VM.
 // The script configures the GitHub Actions runner with the JIT config and runs it.
-func StartupScript(jitConfig string) string {
+// If nested is true, Docker/Colima are installed (requires M3+ Mac with nested virtualization).
+func StartupScript(jitConfig string, nested bool) string {
+	dockerSetup := ""
+	if nested {
+		dockerSetup = `
+# Install Docker via Colima (requires nested virtualization / M3+)
+brew install colima docker docker-compose docker-buildx
+colima start --memory 4 --cpu 2
+`
+	}
+
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
 export ACTIONS_RUNNER_INPUT_JITCONFIG="%s"
 
 source ~/.zprofile
-
-# Install Docker via Colima
-brew install colima docker docker-compose docker-buildx
-colima start --memory 4 --cpu 2
-
+%s
 # Download the latest GitHub Actions runner to avoid version deprecation.
 DOWNLOAD_URL=$(curl -sS 'https://api.github.com/repos/actions/runner/releases/latest' \
   | grep -o '"browser_download_url": *"[^"]*actions-runner-osx-arm64-[0-9.]*\.tar\.gz"' \
@@ -58,5 +64,5 @@ rm -rf "$RUNNER_DIR" && mkdir -p "$RUNNER_DIR" && cd "$RUNNER_DIR"
 curl -sL "$DOWNLOAD_URL" | tar xz
 
 ./run.sh
-`, jitConfig)
+`, jitConfig, dockerSetup)
 }

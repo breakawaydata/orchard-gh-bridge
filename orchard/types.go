@@ -7,6 +7,7 @@ type VM struct {
 	Image         string            `json:"image"`
 	CPU           uint64            `json:"cpu"`
 	Memory        uint64            `json:"memory"`
+	Nested        bool              `json:"nested,omitempty"`
 	Status        string            `json:"status,omitempty"`
 	StatusMessage string            `json:"statusMessage,omitempty"`
 	Worker        string            `json:"worker,omitempty"`

@@ -81,11 +81,78 @@ All VMs are created with the following settings via the [official Orchard client
 | Architecture | `arm64` | Apple Silicon |
 | Runtime | `tart` | Tart hypervisor |
 | Headless | `true` | No GUI needed for CI |
-| Nested virtualization | `true` | Required for Docker/Colima |
+| Nested virtualization | Configurable (`vm.nested`) | Required for Docker/Colima. Only works on M3+ Macs. |
 | SSH credentials | `admin`/`admin` | Default for Cirrus Labs Tart images |
 | Restart policy | `Never` | Ephemeral, one job per VM |
-| Labels | None | VM labels in Orchard act as worker-affinity constraints, not metadata. Setting labels would require workers to have matching labels. |
+| Labels | Configurable (`vm.labels`) | Used as worker-affinity constraints for placement. See below. |
 | Name prefix | `gha-orchard-` | Used by cleanup to identify managed VMs |
+
+### Worker labels and VM placement
+
+Orchard's scheduler uses **VM labels as worker-affinity constraints** -- a VM is only placed on workers whose labels are a superset of the VM's labels. This enables hardware-aware placement:
+
+- **Nested virtualization**: M3+ Macs support nested virt (required for Docker/Colima). M1/M2 Macs do not. Label M3+ workers with `nested-virt: "true"` and set `vm.nested: true` + `vm.labels.nested-virt: "true"` on scale sets that need Docker.
+- **Memory classes**: Workers with different RAM can be labeled (e.g., `vm-class: large` vs `vm-class: standard`) to route VMs to appropriate hardware.
+
+When `vm.nested: true` is set, the startup script automatically installs Docker, Docker Compose, Docker Buildx, and Colima. When `false`, Docker is skipped entirely.
+
+**Example worker setup:**
+
+```bash
+# M3 Mac Mini, 32GB -- supports nested virt and large VMs
+orchard worker run \
+  --labels nested-virt=true,vm-class=large \
+  --resources org.cirruslabs.tart-vms:2
+
+# M1 Mac Mini, 16GB -- standard VMs only, no nested virt
+orchard worker run \
+  --labels vm-class=standard \
+  --resources org.cirruslabs.tart-vms:1
+```
+
+**Example scale set config:**
+
+```yaml
+scaleSets:
+  # Docker-enabled scale set -- only runs on M3+ workers
+  - name: macos-tahoe-docker
+    githubConfigURL: https://github.com/your-org
+    labels: [self-hosted, macOS, ARM64, docker]
+    vm:
+      image: ghcr.io/cirruslabs/macos-tahoe-xcode:26.4
+      cpu: 4
+      memory: 16384
+      nested: true
+      labels:
+        nested-virt: "true"
+        vm-class: "large"
+
+  # Standard scale set -- runs on any worker
+  - name: macos-tahoe
+    githubConfigURL: https://github.com/your-org
+    labels: [self-hosted, macOS, ARM64]
+    vm:
+      image: ghcr.io/cirruslabs/macos-tahoe-xcode:26.4
+      cpu: 4
+      memory: 8192
+      labels:
+        vm-class: "standard"
+```
+
+Then in workflows:
+
+```yaml
+jobs:
+  build-with-docker:
+    runs-on: macos-tahoe-docker
+    steps:
+      - run: docker compose up -d  # Docker available!
+
+  build-standard:
+    runs-on: macos-tahoe
+    steps:
+      - run: xcodebuild build       # No Docker, but works on any Mac
+```
 
 ### Capacity management
 
@@ -259,7 +326,7 @@ See [charts/orchard-gh-bridge/values.yaml](charts/orchard-gh-bridge/values.yaml)
 | `image` | `registry`, `repository`, `tag`, `pullPolicy` |
 | `config.orchard` | `address`, `username` |
 | `config.github` | `appID`, `installationID`, `privateKeyPath`, `token` |
-| `config.scaleSets[]` | `name`, `githubConfigURL`, `labels`, `maxRunners`, `vm.image`, `vm.cpu`, `vm.memory` |
+| `config.scaleSets[]` | `name`, `githubConfigURL`, `labels`, `maxRunners`, `vm.image`, `vm.cpu`, `vm.memory`, `vm.nested`, `vm.labels` |
 | `config.maxVMs` | Global VM capacity cap (0 = auto-detect from workers) |
 | `existingSecret` | Name of a pre-created K8s Secret |
 | `externalSecret` | External Secrets Operator config |
@@ -398,6 +465,12 @@ The Orchard scheduler matches VMs to workers based on architecture, runtime, res
 2. **Worker has capacity:** Check `org.cirruslabs.tart-vms` resource -- must have available slots
 3. **Architecture/runtime match:** Worker must report `arch: arm64` and `runtime: tart`
 4. **VM labels:** VM labels act as worker-affinity constraints. The bridge intentionally sets no labels to avoid this issue.
+
+### Nested virtualization error on M1/M2
+
+If you see `"Error: Nested virtualization is available for Mac with the M3 chip, and later."`, the VM has `nested: true` but is scheduled on an M1/M2 worker. Either:
+- Set `nested: false` for that scale set
+- Add a `nested-virt: "true"` label to the VM and only label M3+ workers with it
 
 ### Runner version deprecated
 
