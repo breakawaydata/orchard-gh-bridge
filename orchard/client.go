@@ -129,6 +129,7 @@ func toV1VM(vm *VM) v1.VM {
 		CPU:      vm.CPU,
 		Memory:   vm.Memory,
 		Headless: true,
+		Nested:   true,
 		Username: "admin",
 		Password: "admin",
 		VMSpec: v1.VMSpec{
