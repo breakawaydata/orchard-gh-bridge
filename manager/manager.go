@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
@@ -150,10 +151,23 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 	}
 	logger.Info("scale set registered", "id", ss.ID)
 
-	// Create message session
-	sessionClient, err := ghClient.MessageSessionClient(ctx, ss.ID, "orchard-gh-bridge")
-	if err != nil {
-		return fmt.Errorf("creating message session for %s: %w", ssCfg.Name, err)
+	// Create message session with retry (GitHub sessions have a TTL and may
+	// conflict briefly during redeployments)
+	var sessionClient *scaleset.MessageSessionClient
+	for attempt := 1; ; attempt++ {
+		sessionClient, err = ghClient.MessageSessionClient(ctx, ss.ID, "orchard-gh-bridge")
+		if err == nil {
+			break
+		}
+		if attempt >= 10 {
+			return fmt.Errorf("creating message session for %s: %w", ssCfg.Name, err)
+		}
+		logger.Warn("session conflict, retrying", "attempt", attempt, "error", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt*3) * time.Second):
+		}
 	}
 	defer sessionClient.Close(ctx) //nolint:errcheck
 
