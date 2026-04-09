@@ -64,7 +64,7 @@ affinity: {}
 # Rendered into a ConfigMap and mounted at /config/config.yaml
 config:
   logLevel: info
-  maxVMs: 4
+  maxVMs: 0  # 0 = auto-detect from connected workers' tart-vms capacity
   orchard:
     address: "http://orchard-controller:6120"
     username: "bootstrap-admin"
@@ -85,6 +85,10 @@ config:
     #     image: ghcr.io/cirruslabs/macos-sequoia-xcode:16
     #     cpu: 4
     #     memory: 8192
+    #     nested: false        # Enable nested virt + Docker/Colima (requires M3+ Mac)
+    #     labels: {}           # Orchard worker-affinity labels for VM placement
+    #       # nested-virt: "true"   # Only schedule on workers with this label
+    #       # vm-class: "large"     # Route to workers with matching memory class
   health:
     port: 8080
   metrics:
