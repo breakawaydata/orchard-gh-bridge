@@ -129,6 +129,14 @@ func toV1VM(vm *VM) v1.VM {
 		CPU:      vm.CPU,
 		Memory:   vm.Memory,
 		Headless: true,
+		Username: "admin",
+		Password: "admin",
+		VMSpec: v1.VMSpec{
+			OS:      v1.OSDarwin,
+			Arch:    v1.ArchitectureARM64,
+			Runtime: v1.RuntimeTart,
+		},
+		RestartPolicy: v1.RestartPolicyNever,
 	}
 	if vm.StartupScript != nil {
 		result.StartupScript = &v1.VMScript{
