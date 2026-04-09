@@ -1,16 +1,14 @@
 package orchard
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"time"
+
+	orchardclient "github.com/cirruslabs/orchard/pkg/client"
+	v1 "github.com/cirruslabs/orchard/pkg/resource/v1"
 
 	"github.com/breakawaydata/orchard-gh-bridge/config"
 )
@@ -26,159 +24,171 @@ type Client interface {
 	Ping(ctx context.Context) error
 }
 
-type httpClient struct {
-	baseURL    string
-	username   string
-	password   string
-	httpClient *http.Client
-	logger     *slog.Logger
+type officialClient struct {
+	inner  *orchardclient.Client
+	logger *slog.Logger
 }
 
-func NewClient(cfg config.OrchardConfig, logger *slog.Logger) Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+func NewClient(cfg config.OrchardConfig, logger *slog.Logger) (Client, error) {
+	opts := []orchardclient.Option{
+		orchardclient.WithAddress(cfg.Address),
+	}
+	if cfg.Username != "" || cfg.Password != "" {
+		opts = append(opts, orchardclient.WithCredentials(cfg.Username, cfg.Password))
+	}
+
+	inner, err := orchardclient.New(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("creating orchard client: %w", err)
+	}
+
 	if cfg.Insecure {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		logger.Warn("orchard.insecure is deprecated; use an http:// address instead")
 	}
 
-	return &httpClient{
-		baseURL:  cfg.Address,
-		username: cfg.Username,
-		password: cfg.Password,
-		httpClient: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: transport,
-		},
-		logger: logger,
-	}
+	return &officialClient{inner: inner, logger: logger}, nil
 }
 
-func (c *httpClient) CreateVM(ctx context.Context, vm *VM) (*VM, error) {
-	body, err := json.Marshal(vm)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling VM: %w", err)
-	}
+func (c *officialClient) CreateVM(ctx context.Context, vm *VM) (*VM, error) {
+	v1vm := toV1VM(vm)
 
-	resp, err := c.do(ctx, http.MethodPost, "/v1/vms", bytes.NewReader(body))
-	if err != nil {
+	if err := c.inner.VMs().Create(ctx, &v1vm); err != nil {
 		return nil, fmt.Errorf("creating VM: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, c.parseError(resp, "creating VM")
+	// Official Create() returns only error; fetch the created VM for callers
+	// that need the response.
+	created, err := c.inner.VMs().Get(ctx, vm.Name)
+	if err != nil {
+		// Creation succeeded; return minimal info if Get fails.
+		result := fromV1VM(v1vm)
+		return &result, nil
 	}
-
-	var created VM
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
-		return nil, fmt.Errorf("decoding create VM response: %w", err)
-	}
-	return &created, nil
+	result := fromV1VM(*created)
+	return &result, nil
 }
 
-func (c *httpClient) GetVM(ctx context.Context, name string) (*VM, error) {
-	resp, err := c.do(ctx, http.MethodGet, "/v1/vms/"+name, nil)
+func (c *officialClient) GetVM(ctx context.Context, name string) (*VM, error) {
+	vm, err := c.inner.VMs().Get(ctx, name)
 	if err != nil {
+		if isNotFound(err) {
+			return nil, fmt.Errorf("VM %q: %w", name, ErrNotFound)
+		}
 		return nil, fmt.Errorf("getting VM: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("VM %q: %w", name, ErrNotFound)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.parseError(resp, "getting VM")
-	}
-
-	var vm VM
-	if err := json.NewDecoder(resp.Body).Decode(&vm); err != nil {
-		return nil, fmt.Errorf("decoding VM response: %w", err)
-	}
-	return &vm, nil
+	result := fromV1VM(*vm)
+	return &result, nil
 }
 
-func (c *httpClient) ListVMs(ctx context.Context) ([]VM, error) {
-	resp, err := c.do(ctx, http.MethodGet, "/v1/vms", nil)
+func (c *officialClient) ListVMs(ctx context.Context) ([]VM, error) {
+	v1vms, err := c.inner.VMs().List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing VMs: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.parseError(resp, "listing VMs")
-	}
-
-	var vms []VM
-	if err := json.NewDecoder(resp.Body).Decode(&vms); err != nil {
-		return nil, fmt.Errorf("decoding VMs response: %w", err)
+	vms := make([]VM, len(v1vms))
+	for i, v := range v1vms {
+		vms[i] = fromV1VM(v)
 	}
 	return vms, nil
 }
 
-func (c *httpClient) DeleteVM(ctx context.Context, name string) error {
-	resp, err := c.do(ctx, http.MethodDelete, "/v1/vms/"+name, nil)
-	if err != nil {
+func (c *officialClient) DeleteVM(ctx context.Context, name string) error {
+	if err := c.inner.VMs().Delete(ctx, name); err != nil {
+		if isNotFound(err) {
+			return nil // already gone
+		}
 		return fmt.Errorf("deleting VM: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil // already gone
-	}
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return c.parseError(resp, "deleting VM")
 	}
 	return nil
 }
 
-func (c *httpClient) ListWorkers(ctx context.Context) ([]Worker, error) {
-	resp, err := c.do(ctx, http.MethodGet, "/v1/workers", nil)
+func (c *officialClient) ListWorkers(ctx context.Context) ([]Worker, error) {
+	v1workers, err := c.inner.Workers().List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing workers: %w", err)
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.parseError(resp, "listing workers")
-	}
-
-	var workers []Worker
-	if err := json.NewDecoder(resp.Body).Decode(&workers); err != nil {
-		return nil, fmt.Errorf("decoding workers response: %w", err)
+	workers := make([]Worker, len(v1workers))
+	for i, w := range v1workers {
+		workers[i] = fromV1Worker(w)
 	}
 	return workers, nil
 }
 
-func (c *httpClient) Ping(ctx context.Context) error {
-	resp, err := c.do(ctx, http.MethodGet, "/v1/workers", nil)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close() //nolint:errcheck
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("orchard ping: status %d", resp.StatusCode)
-	}
-	return nil
+func (c *officialClient) Ping(ctx context.Context) error {
+	return c.inner.Check(ctx)
 }
 
-func (c *httpClient) do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
-	if err != nil {
-		return nil, err
+// --- type conversions ---
+
+func toV1VM(vm *VM) v1.VM {
+	result := v1.VM{
+		Meta: v1.Meta{
+			Name: vm.Name,
+		},
+		Image:    vm.Image,
+		CPU:      vm.CPU,
+		Memory:   vm.Memory,
+		Headless: true,
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if vm.StartupScript != nil {
+		result.StartupScript = &v1.VMScript{
+			ScriptContent: vm.StartupScript.ScriptContent,
+		}
 	}
-	if c.username != "" || c.password != "" {
-		req.SetBasicAuth(c.username, c.password)
+	if len(vm.Labels) > 0 {
+		result.Labels = v1.Labels(vm.Labels)
 	}
-	return c.httpClient.Do(req)
+	return result
 }
 
-func (c *httpClient) parseError(resp *http.Response, context string) error {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	var apiErr apiError
-	if json.Unmarshal(body, &apiErr) == nil && apiErr.Message != "" {
-		return fmt.Errorf("%s: %s (status %d)", context, apiErr.Message, resp.StatusCode)
+func fromV1VM(vm v1.VM) VM {
+	return VM{
+		Name:          vm.Name,
+		Image:         vm.Image,
+		CPU:           vm.CPU,
+		Memory:        vm.Memory,
+		Status:        mapV1Status(vm.Status),
+		StatusMessage: vm.StatusMessage,
+		Worker:        vm.Worker,
+		StartupScript: fromV1Script(vm.StartupScript),
+		Labels:        map[string]string(vm.Labels),
+		CreatedAt:     vm.CreatedAt,
 	}
-	return fmt.Errorf("%s: status %d: %s", context, resp.StatusCode, string(body))
+}
+
+func mapV1Status(s v1.VMStatus) string {
+	switch s {
+	case v1.VMStatusPending:
+		return VMStatusCreating
+	case v1.VMStatusRunning:
+		return VMStatusRunning
+	case v1.VMStatusFailed:
+		return VMStatusFailed
+	default:
+		return string(s)
+	}
+}
+
+func fromV1Script(s *v1.VMScript) *VMScript {
+	if s == nil {
+		return nil
+	}
+	return &VMScript{ScriptContent: s.ScriptContent}
+}
+
+func fromV1Worker(w v1.Worker) Worker {
+	return Worker{
+		Name:             w.Name,
+		Resources:        map[string]uint64(w.Resources),
+		SchedulingPaused: w.SchedulingPaused,
+		LastSeen:         w.LastSeen,
+	}
+}
+
+func isNotFound(err error) bool {
+	var apiErr *orchardclient.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusNotFound
+	}
+	return false
 }

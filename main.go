@@ -37,7 +37,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	orchardClient := orchard.NewClient(cfg.Orchard, logger)
+	orchardClient, err := orchard.NewClient(cfg.Orchard, logger)
+	if err != nil {
+		logger.Error("failed to create orchard client", "error", err)
+		os.Exit(1)
+	}
 
 	healthSrv := health.NewServer(cfg.Health.Port, orchardClient, logger)
 	go healthSrv.Start()

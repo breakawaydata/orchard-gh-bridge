@@ -33,6 +33,3 @@ const (
 	VMStatusFailed   = "failed"
 )
 
-type apiError struct {
-	Message string `json:"message"`
-}

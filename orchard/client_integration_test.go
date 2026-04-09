@@ -22,12 +22,15 @@ func integrationClient(t *testing.T) Client {
 
 	password := os.Getenv("ORCHARD_PASSWORD")
 
-	return NewClient(config.OrchardConfig{
+	c, err := NewClient(config.OrchardConfig{
 		Address:  addr,
 		Username: "bootstrap-admin",
 		Password: password,
-		Insecure: true,
 	}, slog.Default())
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	return c
 }
 
 func TestIntegration_VMLifecycle(t *testing.T) {

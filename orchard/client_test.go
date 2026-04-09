@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	v1 "github.com/cirruslabs/orchard/pkg/resource/v1"
+
 	"github.com/breakawaydata/orchard-gh-bridge/config"
 )
 
@@ -16,34 +18,39 @@ func testClient(t *testing.T, handler http.Handler) Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return NewClient(config.OrchardConfig{
+	c, err := NewClient(config.OrchardConfig{
 		Address:  srv.URL,
 		Username: "admin",
 		Password: "secret",
 	}, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 func TestCreateVM(t *testing.T) {
+	var gotName string
 	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/vms" {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/vms":
+			var vm v1.VM
+			if err := json.NewDecoder(r.Body).Decode(&vm); err != nil {
+				t.Fatal(err)
+			}
+			gotName = vm.Name
+			if !vm.Headless {
+				t.Error("expected headless=true")
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/vms/test-vm":
+			_ = json.NewEncoder(w).Encode(v1.VM{
+				Meta:   v1.Meta{Name: gotName},
+				Status: v1.VMStatusPending,
+			})
+		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != "admin" || pass != "secret" {
-			t.Errorf("bad auth: %q %q %v", user, pass, ok)
-		}
-
-		var vm VM
-		if err := json.NewDecoder(r.Body).Decode(&vm); err != nil {
-			t.Fatal(err)
-		}
-		if vm.Name != "test-vm" {
-			t.Errorf("vm.Name = %q, want test-vm", vm.Name)
-		}
-
-		vm.Status = VMStatusCreating
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(vm)
 	}))
 
 	vm, err := c.CreateVM(context.Background(), &VM{
@@ -53,6 +60,9 @@ func TestCreateVM(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if gotName != "test-vm" {
+		t.Errorf("sent name = %q, want test-vm", gotName)
 	}
 	if vm.Status != VMStatusCreating {
 		t.Errorf("status = %q, want creating", vm.Status)
@@ -64,7 +74,10 @@ func TestGetVM(t *testing.T) {
 		if r.URL.Path != "/v1/vms/my-vm" {
 			t.Errorf("path = %q, want /v1/vms/my-vm", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(VM{Name: "my-vm", Status: VMStatusRunning})
+		_ = json.NewEncoder(w).Encode(v1.VM{
+			Meta:   v1.Meta{Name: "my-vm"},
+			Status: v1.VMStatusRunning,
+		})
 	}))
 
 	vm, err := c.GetVM(context.Background(), "my-vm")
@@ -92,9 +105,9 @@ func TestListVMs(t *testing.T) {
 		if r.URL.Path != "/v1/vms" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode([]VM{
-			{Name: "vm-1", Status: VMStatusRunning},
-			{Name: "vm-2", Status: VMStatusStopped},
+		_ = json.NewEncoder(w).Encode([]v1.VM{
+			{Meta: v1.Meta{Name: "vm-1"}, Status: v1.VMStatusRunning},
+			{Meta: v1.Meta{Name: "vm-2"}, Status: v1.VMStatusFailed},
 		})
 	}))
 
@@ -112,7 +125,7 @@ func TestDeleteVM(t *testing.T) {
 		if r.Method != http.MethodDelete {
 			t.Errorf("method = %q", r.Method)
 		}
-		w.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(http.StatusOK)
 	}))
 
 	if err := c.DeleteVM(context.Background(), "test-vm"); err != nil {
@@ -135,8 +148,8 @@ func TestListWorkers(t *testing.T) {
 		if r.URL.Path != "/v1/workers" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode([]Worker{
-			{Name: "worker-1"},
+		_ = json.NewEncoder(w).Encode([]v1.Worker{
+			{Meta: v1.Meta{Name: "worker-1"}},
 		})
 	}))
 
@@ -152,7 +165,7 @@ func TestListWorkers(t *testing.T) {
 func TestAPIError(t *testing.T) {
 	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(apiError{Message: "worker at capacity"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": "worker at capacity"})
 	}))
 
 	_, err := c.CreateVM(context.Background(), &VM{Name: "fail"})
