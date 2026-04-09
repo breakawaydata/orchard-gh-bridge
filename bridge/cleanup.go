@@ -13,19 +13,26 @@ const (
 	DefaultMaxVMAge        = 2 * time.Hour
 )
 
+// RunnerRemover deregisters GitHub Actions runner registrations.
+type RunnerRemover interface {
+	RemoveRunnerByName(ctx context.Context, name string) error
+}
+
 // Cleanup periodically reaps stale VMs from Orchard that are managed by the bridge.
 type Cleanup struct {
 	orchardClient orchard.Client
 	capacity      *Capacity
+	runnerRemover RunnerRemover
 	logger        *slog.Logger
 	interval      time.Duration
 	maxAge        time.Duration
 }
 
-func NewCleanup(orchardClient orchard.Client, capacity *Capacity, logger *slog.Logger) *Cleanup {
+func NewCleanup(orchardClient orchard.Client, capacity *Capacity, runnerRemover RunnerRemover, logger *slog.Logger) *Cleanup {
 	return &Cleanup{
 		orchardClient: orchardClient,
 		capacity:      capacity,
+		runnerRemover: runnerRemover,
 		logger:        logger.With("component", "cleanup"),
 		interval:      DefaultCleanupInterval,
 		maxAge:        DefaultMaxVMAge,
@@ -87,6 +94,7 @@ func (c *Cleanup) sweep(ctx context.Context) {
 				c.logger.Error("failed to delete VM during cleanup", "vm", vm.Name, "error", err)
 				continue
 			}
+			c.removeRunner(ctx, vm.Name)
 			deleted++
 			managedCount--
 		}
@@ -100,6 +108,15 @@ func (c *Cleanup) sweep(ctx context.Context) {
 
 	if deleted > 0 {
 		c.logger.Info("cleanup sweep complete", "deleted", deleted, "remaining", managedCount)
+	}
+}
+
+func (c *Cleanup) removeRunner(ctx context.Context, name string) {
+	if c.runnerRemover == nil {
+		return
+	}
+	if err := c.runnerRemover.RemoveRunnerByName(ctx, name); err != nil {
+		c.logger.Debug("failed to deregister runner from GitHub", "runner", name, "error", err)
 	}
 }
 

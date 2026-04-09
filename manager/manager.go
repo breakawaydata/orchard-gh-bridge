@@ -107,8 +107,17 @@ func (m *Manager) defaultNewGHClient(configURL string) (*scaleset.Client, error)
 func (m *Manager) Run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 
+	// Create a GitHub client for runner cleanup
+	var runnerRemover brdg.RunnerRemover
+	ghClient, err := m.newGHClient(m.cfg.ScaleSets[0].GitHubConfigURL)
+	if err != nil {
+		m.logger.Warn("failed to create GitHub client for runner cleanup", "error", err)
+	} else {
+		runnerRemover = brdg.NewScaleSetRunnerRemover(ghClient)
+	}
+
 	// Start cleanup goroutine
-	cleanup := brdg.NewCleanup(m.orchardClient, m.capacity, m.logger)
+	cleanup := brdg.NewCleanup(m.orchardClient, m.capacity, runnerRemover, m.logger)
 	g.Go(func() error {
 		cleanup.Run(ctx)
 		return nil

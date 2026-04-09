@@ -103,7 +103,7 @@ func TestCleanup_ReapsStopped(t *testing.T) {
 	cap := NewCapacity(4)
 	cap.TryAcquire(2)
 
-	cleanup := NewCleanup(mock, cap, testLogger())
+	cleanup := NewCleanup(mock, cap, nil, testLogger())
 	cleanup.sweep(context.Background())
 
 	if mock.vmCount() != 1 {
@@ -122,7 +122,7 @@ func TestCleanup_IgnoresUnmanaged(t *testing.T) {
 	}
 
 	cap := NewCapacity(4)
-	cleanup := NewCleanup(mock, cap, testLogger())
+	cleanup := NewCleanup(mock, cap, nil, testLogger())
 	cleanup.sweep(context.Background())
 
 	if mock.vmCount() != 1 {

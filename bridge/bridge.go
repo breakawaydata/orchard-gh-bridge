@@ -151,6 +151,11 @@ func (b *Bridge) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCo
 		return err
 	}
 
+	// Deregister the runner from GitHub (best-effort)
+	if err := b.ghClient.RemoveRunner(ctx, int64(jobInfo.RunnerID)); err != nil {
+		b.logger.Debug("failed to deregister runner", "runner", runnerName, "error", err)
+	}
+
 	b.capacity.Release(1)
 	return nil
 }
