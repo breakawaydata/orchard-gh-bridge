@@ -2,15 +2,26 @@ package bridge
 
 import "sync"
 
+// MaxChangedFunc is called when the maximum capacity changes.
+type MaxChangedFunc func(newMax int)
+
 // Capacity tracks global VM slots across all scale sets.
 type Capacity struct {
-	mu      sync.Mutex
-	current int
-	max     int
+	mu        sync.Mutex
+	current   int
+	max       int
+	callbacks []MaxChangedFunc
 }
 
 func NewCapacity(max int) *Capacity {
 	return &Capacity{max: max}
+}
+
+// OnMaxChanged registers a callback invoked when SetMax changes the capacity.
+func (c *Capacity) OnMaxChanged(fn MaxChangedFunc) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.callbacks = append(c.callbacks, fn)
 }
 
 // TryAcquire attempts to reserve n slots. Returns the actual number acquired,
@@ -61,9 +72,27 @@ func (c *Capacity) Reconcile(actual int) {
 	c.current = min(actual, c.max)
 }
 
-// SetMax updates the maximum capacity (e.g. when workers come/go).
+// SetMax updates the maximum capacity (e.g. when workers come/go)
+// and notifies all registered listeners.
 func (c *Capacity) SetMax(max int) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	if c.max == max {
+		c.mu.Unlock()
+		return
+	}
 	c.max = max
+	cbs := make([]MaxChangedFunc, len(c.callbacks))
+	copy(cbs, c.callbacks)
+	c.mu.Unlock()
+
+	for _, fn := range cbs {
+		fn(max)
+	}
+}
+
+// Max returns the current maximum capacity.
+func (c *Capacity) Max() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.max
 }

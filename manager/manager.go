@@ -34,13 +34,13 @@ func New(cfg *config.Config, orchardClient orchard.Client, logger *slog.Logger) 
 	if maxVMs == 0 {
 		total, err := discoverCapacity(context.Background(), orchardClient)
 		if err != nil {
-			return nil, fmt.Errorf("discovering worker capacity: %w", err)
-		}
-		if total == 0 {
-			return nil, fmt.Errorf("no workers with tart-vms capacity found; set maxVMs explicitly or connect a worker")
+			mgrLogger.Warn("failed to discover worker capacity, starting with 0", "error", err)
+		} else if total == 0 {
+			mgrLogger.Warn("no workers with tart-vms capacity found yet, will detect when workers connect")
+		} else {
+			mgrLogger.Info("auto-detected capacity from workers", "maxVMs", total)
 		}
 		maxVMs = total
-		mgrLogger.Info("auto-detected capacity from workers", "maxVMs", maxVMs)
 	}
 
 	m := &Manager{
@@ -171,13 +171,12 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 	}
 	defer sessionClient.Close(ctx) //nolint:errcheck
 
-	// Determine max runners for this scale set
-	maxRunners := m.cfg.MaxVMs
+	// Create listener with current capacity
+	maxRunners := m.capacity.Max()
 	if ssCfg.MaxRunners > 0 {
 		maxRunners = ssCfg.MaxRunners
 	}
 
-	// Create listener
 	l, err := listener.New(sessionClient, listener.Config{
 		ScaleSetID: ss.ID,
 		MaxRunners: maxRunners,
@@ -185,6 +184,14 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 	})
 	if err != nil {
 		return fmt.Errorf("creating listener for %s: %w", ssCfg.Name, err)
+	}
+
+	// Update GitHub when worker capacity changes
+	if ssCfg.MaxRunners == 0 {
+		m.capacity.OnMaxChanged(func(newMax int) {
+			logger.Info("updating maxRunners", "maxRunners", newMax)
+			l.SetMaxRunners(newMax)
+		})
 	}
 
 	// Create bridge (Scaler implementation)
