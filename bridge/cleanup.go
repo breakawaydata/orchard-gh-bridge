@@ -135,6 +135,30 @@ func (c *Cleanup) refreshMaxCapacity(ctx context.Context) {
 		}
 	}
 	if total > 0 {
-		c.capacity.SetMax(total)
+		c.capacity.SetMax(total, workers)
 	}
+}
+
+// CapacityForLabels computes the total tart-vms capacity across workers
+// whose labels are a superset of the given VM labels.
+func CapacityForLabels(workers []orchard.Worker, vmLabels map[string]string) int {
+	var total int
+	for _, w := range workers {
+		if !workerMatchesLabels(w, vmLabels) {
+			continue
+		}
+		if n, ok := w.Resources[resourceTartVMs]; ok {
+			total += int(n)
+		}
+	}
+	return total
+}
+
+func workerMatchesLabels(w orchard.Worker, vmLabels map[string]string) bool {
+	for k, v := range vmLabels {
+		if w.Labels[k] != v {
+			return false
+		}
+	}
+	return true
 }

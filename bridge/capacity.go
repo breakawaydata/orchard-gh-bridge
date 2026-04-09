@@ -1,24 +1,29 @@
 package bridge
 
-import "sync"
+import (
+	"sync"
 
-// MaxChangedFunc is called when the maximum capacity changes.
-type MaxChangedFunc func(newMax int)
+	"github.com/breakawaydata/orchard-gh-bridge/orchard"
+)
+
+// WorkersChangedFunc is called when worker capacity changes.
+// Each callback receives the full worker list to compute its own capacity.
+type WorkersChangedFunc func(workers []orchard.Worker)
 
 // Capacity tracks global VM slots across all scale sets.
 type Capacity struct {
 	mu        sync.Mutex
 	current   int
 	max       int
-	callbacks []MaxChangedFunc
+	callbacks []WorkersChangedFunc
 }
 
 func NewCapacity(max int) *Capacity {
 	return &Capacity{max: max}
 }
 
-// OnMaxChanged registers a callback invoked when SetMax changes the capacity.
-func (c *Capacity) OnMaxChanged(fn MaxChangedFunc) {
+// OnWorkersChanged registers a callback invoked when SetMax detects worker changes.
+func (c *Capacity) OnWorkersChanged(fn WorkersChangedFunc) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.callbacks = append(c.callbacks, fn)
@@ -72,21 +77,20 @@ func (c *Capacity) Reconcile(actual int) {
 	c.current = min(actual, c.max)
 }
 
-// SetMax updates the maximum capacity (e.g. when workers come/go)
-// and notifies all registered listeners.
-func (c *Capacity) SetMax(max int) {
+// SetMax updates the global maximum capacity and notifies listeners
+// with the current worker list so they can compute per-label capacity.
+func (c *Capacity) SetMax(max int, workers []orchard.Worker) {
 	c.mu.Lock()
-	if c.max == max {
-		c.mu.Unlock()
-		return
-	}
+	changed := c.max != max
 	c.max = max
-	cbs := make([]MaxChangedFunc, len(c.callbacks))
+	cbs := make([]WorkersChangedFunc, len(c.callbacks))
 	copy(cbs, c.callbacks)
 	c.mu.Unlock()
 
-	for _, fn := range cbs {
-		fn(max)
+	if changed {
+		for _, fn := range cbs {
+			fn(workers)
+		}
 	}
 }
 

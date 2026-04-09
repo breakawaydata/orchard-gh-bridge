@@ -22,6 +22,7 @@ type VMScript struct {
 
 type Worker struct {
 	Name             string            `json:"name"`
+	Labels           map[string]string `json:"labels,omitempty"`
 	Resources        map[string]uint64 `json:"resources,omitempty"`
 	SchedulingPaused bool              `json:"scheduling_paused"`
 	LastSeen         time.Time         `json:"last_seen"`

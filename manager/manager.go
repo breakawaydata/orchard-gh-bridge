@@ -171,10 +171,18 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 	}
 	defer sessionClient.Close(ctx) //nolint:errcheck
 
-	// Create listener with current capacity
-	maxRunners := m.capacity.Max()
+	// Determine max runners: static override or label-matched capacity
+	var maxRunners int
 	if ssCfg.MaxRunners > 0 {
 		maxRunners = ssCfg.MaxRunners
+	} else {
+		workers, err := m.orchardClient.ListWorkers(ctx)
+		if err != nil {
+			logger.Warn("failed to list workers for initial capacity", "error", err)
+		} else {
+			maxRunners = brdg.CapacityForLabels(workers, ssCfg.VM.Labels)
+		}
+		logger.Info("initial maxRunners from matching workers", "maxRunners", maxRunners)
 	}
 
 	l, err := listener.New(sessionClient, listener.Config{
@@ -186,11 +194,14 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 		return fmt.Errorf("creating listener for %s: %w", ssCfg.Name, err)
 	}
 
-	// Update GitHub when worker capacity changes
+	// Update GitHub when worker capacity changes, using only workers
+	// whose labels match this scale set's VM labels
 	if ssCfg.MaxRunners == 0 {
-		m.capacity.OnMaxChanged(func(newMax int) {
-			logger.Info("updating maxRunners", "maxRunners", newMax)
-			l.SetMaxRunners(newMax)
+		vmLabels := ssCfg.VM.Labels
+		m.capacity.OnWorkersChanged(func(workers []orchard.Worker) {
+			matched := brdg.CapacityForLabels(workers, vmLabels)
+			logger.Info("updating maxRunners from matching workers", "maxRunners", matched)
+			l.SetMaxRunners(matched)
 		})
 	}
 

@@ -191,6 +191,7 @@ func fromV1Script(s *v1.VMScript) *VMScript {
 func fromV1Worker(w v1.Worker) Worker {
 	return Worker{
 		Name:             w.Name,
+		Labels:           map[string]string(w.Labels),
 		Resources:        map[string]uint64(w.Resources),
 		SchedulingPaused: w.SchedulingPaused,
 		LastSeen:         w.LastSeen,
