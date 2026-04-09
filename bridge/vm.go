@@ -36,10 +36,21 @@ func VMName(scaleSetName string) string {
 
 // StartupScript generates the bash script injected into the Orchard VM.
 // The script configures the GitHub Actions runner with the JIT config and runs it.
-// If nested is true, Docker/Colima are installed (requires M3+ Mac with nested virtualization).
-func StartupScript(jitConfig string, nested bool) string {
+//
+// Docker support modes (mutually exclusive):
+//   - dockerPort > 0: install Docker CLI and connect to the host daemon via TCP
+//     (host IP is auto-detected from the VM's default gateway)
+//   - nested: install Colima inside the VM (requires nested virtualization)
+func StartupScript(jitConfig string, nested bool, dockerPort int) string {
 	dockerSetup := ""
-	if nested {
+	if dockerPort > 0 {
+		dockerSetup = fmt.Sprintf(`
+# Install Docker CLI and connect to host Docker daemon via TCP
+brew install docker docker-compose docker-buildx
+DOCKER_HOST_IP=$(route -n get default | awk '/gateway:/ {print $2}')
+export DOCKER_HOST="tcp://${DOCKER_HOST_IP}:%d"
+`, dockerPort)
+	} else if nested {
 		dockerSetup = `
 # Install Docker via Colima (requires nested virtualization / M3+)
 brew install colima docker docker-compose docker-buildx

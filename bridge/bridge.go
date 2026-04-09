@@ -86,7 +86,7 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 			return currentActive + created, fmt.Errorf("generating JIT config: %w", err)
 		}
 
-		script := StartupScript(jitConfig.EncodedJITConfig, b.vmConfig.Nested)
+		script := StartupScript(jitConfig.EncodedJITConfig, b.vmConfig.Nested, b.vmConfig.DockerPort)
 		vm := &orchard.VM{
 			Name:   vmName,
 			Image:  b.vmConfig.Image,

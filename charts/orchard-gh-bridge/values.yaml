@@ -86,6 +86,7 @@ config:
     #     cpu: 4
     #     memory: 8192
     #     nested: false        # Enable nested virt + Docker/Colima (requires M3+ Mac)
+    #     dockerPort: 0        # Connect to host Docker via TCP (auto-detects host IP from gateway)
     #     labels: {}           # Orchard worker-affinity labels for VM placement
     #       # nested-virt: "true"   # Only schedule on workers with this label
     #       # vm-class: "large"     # Route to workers with matching memory class
