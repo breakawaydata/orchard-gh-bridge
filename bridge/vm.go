@@ -50,7 +50,7 @@ if [ -d /opt/runner ]; then
 fi
 
 # Fallback: download and install runner
-RUNNER_VERSION="2.323.0"
+RUNNER_VERSION="2.333.1"
 RUNNER_ARCH="osx-arm64"
 RUNNER_DIR="$HOME/actions-runner"
 
