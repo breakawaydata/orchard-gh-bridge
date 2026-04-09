@@ -162,6 +162,43 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 	}
 	logger.Info("scale set registered", "id", ss.ID)
 
+	// Determine max runners: static override or label-matched capacity.
+	// Wait for matching workers before creating the session so GitHub
+	// never sees maxCapacity=0 (which causes it to skip routing jobs
+	// to the scale set even after capacity increases).
+	var maxRunners int
+	if ssCfg.MaxRunners > 0 {
+		maxRunners = ssCfg.MaxRunners
+	} else {
+		workers, err := m.orchardClient.ListWorkers(ctx)
+		if err != nil {
+			logger.Warn("failed to list workers for initial capacity", "error", err)
+		} else {
+			maxRunners = brdg.CapacityForLabels(workers, ssCfg.VM.Labels)
+		}
+
+		if maxRunners == 0 {
+			logger.Info("no matching workers yet, waiting for workers to connect")
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(10 * time.Second):
+				}
+				workers, err := m.orchardClient.ListWorkers(ctx)
+				if err != nil {
+					logger.Warn("failed to list workers while waiting", "error", err)
+					continue
+				}
+				maxRunners = brdg.CapacityForLabels(workers, ssCfg.VM.Labels)
+				if maxRunners > 0 {
+					break
+				}
+			}
+		}
+		logger.Info("initial maxRunners from matching workers", "maxRunners", maxRunners)
+	}
+
 	// Create message session with retry (GitHub sessions have a TTL and may
 	// conflict briefly during redeployments)
 	var sessionClient *scaleset.MessageSessionClient
@@ -181,20 +218,6 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 		}
 	}
 	defer sessionClient.Close(ctx) //nolint:errcheck
-
-	// Determine max runners: static override or label-matched capacity
-	var maxRunners int
-	if ssCfg.MaxRunners > 0 {
-		maxRunners = ssCfg.MaxRunners
-	} else {
-		workers, err := m.orchardClient.ListWorkers(ctx)
-		if err != nil {
-			logger.Warn("failed to list workers for initial capacity", "error", err)
-		} else {
-			maxRunners = brdg.CapacityForLabels(workers, ssCfg.VM.Labels)
-		}
-		logger.Info("initial maxRunners from matching workers", "maxRunners", maxRunners)
-	}
 
 	l, err := listener.New(sessionClient, listener.Config{
 		ScaleSetID: ss.ID,
