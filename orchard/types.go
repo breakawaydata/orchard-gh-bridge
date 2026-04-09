@@ -32,4 +32,3 @@ const (
 	VMStatusStopped  = "stopped"
 	VMStatusFailed   = "failed"
 )
-
