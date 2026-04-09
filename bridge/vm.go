@@ -42,6 +42,12 @@ set -euo pipefail
 
 export ACTIONS_RUNNER_INPUT_JITCONFIG="%s"
 
+source ~/.zprofile
+
+# Install Docker and Docker Compose via Homebrew
+brew install docker docker-compose colima
+colima start --memory 4 --cpu 2
+
 # Download the latest GitHub Actions runner to avoid version deprecation.
 DOWNLOAD_URL=$(curl -sS 'https://api.github.com/repos/actions/runner/releases/latest' \
   | grep -o '"browser_download_url": *"[^"]*actions-runner-osx-arm64-[0-9.]*\.tar\.gz"' \
