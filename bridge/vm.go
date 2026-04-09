@@ -42,14 +42,8 @@ set -euo pipefail
 
 export ACTIONS_RUNNER_INPUT_JITCONFIG="%s"
 
-# Use runner pre-installed in the Tart image if available
-if [ -d /opt/runner ]; then
-  cd /opt/runner
-  ./run.sh
-  exit $?
-fi
-
-# Fallback: download and install runner
+# Always download the latest supported runner to avoid version deprecation.
+# The pre-installed /opt/runner in Tart images may be outdated.
 RUNNER_VERSION="2.333.1"
 RUNNER_ARCH="osx-arm64"
 RUNNER_DIR="$HOME/actions-runner"
