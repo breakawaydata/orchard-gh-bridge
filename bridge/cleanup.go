@@ -59,7 +59,7 @@ func (c *Cleanup) sweep(ctx context.Context) {
 	var deleted int
 
 	for _, vm := range vms {
-		if vm.Labels["managed-by"] != ManagedByLabel {
+		if !IsManagedVM(vm.Name) {
 			continue
 		}
 		managedCount++

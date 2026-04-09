@@ -143,9 +143,10 @@ func toV1VM(vm *VM) v1.VM {
 			ScriptContent: vm.StartupScript.ScriptContent,
 		}
 	}
-	if len(vm.Labels) > 0 {
-		result.Labels = v1.Labels(vm.Labels)
-	}
+	// NOTE: do NOT set result.Labels here. In Orchard, VM labels act as
+	// worker-label requirements — the scheduler only places the VM on workers
+	// whose labels are a superset. Our tracking labels (managed-by, scale-set)
+	// would prevent scheduling since the worker doesn't carry them.
 	return result
 }
 

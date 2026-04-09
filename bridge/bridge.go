@@ -95,10 +95,6 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 			StartupScript: &orchard.VMScript{
 				ScriptContent: script,
 			},
-			Labels: map[string]string{
-				"managed-by": ManagedByLabel,
-				"scale-set":  b.scaleSetName,
-			},
 		}
 
 		if _, err := b.orchardClient.CreateVM(ctx, vm); err != nil {

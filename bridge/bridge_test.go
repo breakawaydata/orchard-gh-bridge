@@ -91,15 +91,13 @@ func TestCapacity_Basic(t *testing.T) {
 
 func TestCleanup_ReapsStopped(t *testing.T) {
 	mock := newMockOrchard()
-	mock.vms["vm-1"] = &orchard.VM{
-		Name:   "vm-1",
+	mock.vms["gha-test-1"] = &orchard.VM{
+		Name:   "gha-test-1",
 		Status: orchard.VMStatusStopped,
-		Labels: map[string]string{"managed-by": ManagedByLabel},
 	}
-	mock.vms["vm-2"] = &orchard.VM{
-		Name:   "vm-2",
+	mock.vms["gha-test-2"] = &orchard.VM{
+		Name:   "gha-test-2",
 		Status: orchard.VMStatusRunning,
-		Labels: map[string]string{"managed-by": ManagedByLabel},
 	}
 
 	cap := NewCapacity(4)
@@ -121,7 +119,6 @@ func TestCleanup_IgnoresUnmanaged(t *testing.T) {
 	mock.vms["unmanaged"] = &orchard.VM{
 		Name:   "unmanaged",
 		Status: orchard.VMStatusStopped,
-		Labels: map[string]string{},
 	}
 
 	cap := NewCapacity(4)
