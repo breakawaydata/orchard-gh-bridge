@@ -282,9 +282,15 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 	// Hydrate activeVMs from any existing Orchard VMs for this scale set,
 	// and reserve the corresponding capacity slots. Must happen before
 	// listener.Run, which is the only caller of HandleDesiredRunnerCount.
-	if adopted, herr := b.HydrateFromOrchard(ctx); herr != nil {
-		logger.Warn("hydrate from orchard failed", "error", herr)
-	} else if adopted > 0 {
+	// HydrateFromOrchard may return adopted>0 alongside a non-nil err when
+	// StateView.Get returns a stale snapshot after a failed refresh — in that
+	// case the VMs are already in activeVMs, so we must still reserve their
+	// slots or the global semaphore will let other bridges over-provision.
+	adopted, herr := b.HydrateFromOrchard(ctx)
+	if herr != nil {
+		logger.Warn("hydrate from orchard returned error", "adopted", adopted, "error", herr)
+	}
+	if adopted > 0 {
 		logger.Info("adopted existing VMs from orchard", "count", adopted)
 		m.capacity.AdoptExisting(adopted)
 	}

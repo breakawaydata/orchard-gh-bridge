@@ -158,7 +158,8 @@ func (s *Snapshot) ManagedVMsForScaleSet(scaleSetName string) []orchard.VM {
 // ManagedVMsMatchingLabels returns managed VMs that either run on a worker
 // whose labels superset vmLabels, or — if the VM is not yet worker-assigned —
 // whose own Labels superset vmLabels. The latter fallback covers pending VMs
-// that have not been placed yet.
+// that have not been placed yet; a VM with a known mismatching worker is not
+// a match, regardless of its own Labels.
 func (s *Snapshot) ManagedVMsMatchingLabels(vmLabels map[string]string) []orchard.VM {
 	out := make([]orchard.VM, 0, len(s.VMs))
 	for _, vm := range s.VMs {
@@ -169,8 +170,10 @@ func (s *Snapshot) ManagedVMsMatchingLabels(vmLabels map[string]string) []orchar
 			w, ok := s.workersByName[vm.Worker]
 			if ok && workerMatchesLabels(*w, vmLabels) {
 				out = append(out, vm)
-				continue
 			}
+			// Worker is known: trust it. Don't fall through to the VM-label
+			// fallback — that would over-count VMs placed on mismatching workers.
+			continue
 		}
 		if labelsSuperset(vm.Labels, vmLabels) {
 			out = append(out, vm)
