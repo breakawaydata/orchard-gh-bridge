@@ -16,19 +16,28 @@ import (
 	"github.com/breakawaydata/orchard-gh-bridge/orchard"
 )
 
+// scaleSetHandle ties a bridge to its listener so the manager can push
+// updated maxRunners values as the shared worker pool shifts.
+type scaleSetHandle struct {
+	bridge           *brdg.Bridge
+	listener         *listener.Listener
+	staticMaxRunners int // > 0 means the config pinned maxRunners; don't recompute
+}
+
 // Manager orchestrates multiple scale set bridges sharing a global capacity pool.
 type Manager struct {
 	cfg           *config.Config
 	orchardClient orchard.Client
 	logger        *slog.Logger
 	capacity      *brdg.Capacity
+	state         *brdg.StateView
 
 	// newGHClient creates a scaleset client for the given config URL.
 	// Extracted for testing.
 	newGHClient func(configURL string) (*scaleset.Client, error)
 
 	bridgesMu sync.Mutex
-	bridges   []*brdg.Bridge
+	handles   []*scaleSetHandle
 }
 
 func New(cfg *config.Config, orchardClient orchard.Client, logger *slog.Logger) (*Manager, error) {
@@ -52,6 +61,7 @@ func New(cfg *config.Config, orchardClient orchard.Client, logger *slog.Logger) 
 		orchardClient: orchardClient,
 		logger:        mgrLogger,
 		capacity:      brdg.NewCapacity(maxVMs),
+		state:         brdg.NewStateView(orchardClient, brdg.DefaultStateViewTTL),
 	}
 
 	m.newGHClient = m.defaultNewGHClient
@@ -112,6 +122,13 @@ func (m *Manager) defaultNewGHClient(configURL string) (*scaleset.Client, error)
 func (m *Manager) Run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 
+	// Whenever the shared worker pool changes (workers come/go, resources
+	// change), recompute each scale set's share of the pool and push it to
+	// GitHub. Registered once at manager level, not per-scale-set.
+	m.capacity.OnWorkersChanged(func(_ []orchard.Worker) {
+		m.recomputeScaleSetShares(ctx)
+	})
+
 	// Create a GitHub client for runner cleanup
 	var runnerRemover brdg.RunnerRemover
 	ghClient, err := m.newGHClient(m.cfg.ScaleSets[0].GitHubConfigURL)
@@ -123,12 +140,18 @@ func (m *Manager) Run(ctx context.Context) error {
 
 	// Start cleanup goroutine
 	cleanup := brdg.NewCleanup(m.orchardClient, m.capacity, runnerRemover, m.logger)
+	cleanup.SetStateView(m.state)
 	cleanup.SetOnVMCleaned(func(vmName string) {
 		m.bridgesMu.Lock()
-		defer m.bridgesMu.Unlock()
-		for _, b := range m.bridges {
-			b.PurgeActiveVM(vmName)
+		handles := make([]*scaleSetHandle, len(m.handles))
+		copy(handles, m.handles)
+		m.bridgesMu.Unlock()
+		for _, h := range handles {
+			h.bridge.PurgeActiveVM(vmName)
 		}
+		// Cleanup deleted something → shared pool shifted, refresh each
+		// scale set's reported maxRunners.
+		m.recomputeScaleSetShares(context.Background())
 	})
 	g.Go(func() error {
 		cleanup.Run(ctx)
@@ -228,17 +251,6 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 		return fmt.Errorf("creating listener for %s: %w", ssCfg.Name, err)
 	}
 
-	// Update GitHub when worker capacity changes, using only workers
-	// whose labels match this scale set's VM labels
-	if ssCfg.MaxRunners == 0 {
-		vmLabels := ssCfg.VM.Labels
-		m.capacity.OnWorkersChanged(func(workers []orchard.Worker) {
-			matched := brdg.CapacityForLabels(workers, vmLabels)
-			logger.Info("updating maxRunners from matching workers", "maxRunners", matched)
-			l.SetMaxRunners(matched)
-		})
-	}
-
 	// Create bridge (Scaler implementation)
 	b := brdg.New(brdg.Config{
 		ScaleSetName:  ssCfg.Name,
@@ -247,12 +259,39 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 		OrchardClient: m.orchardClient,
 		GHClient:      ghClient,
 		Capacity:      m.capacity,
+		State:         m.state,
 		Logger:        m.logger,
 	})
 
+	handle := &scaleSetHandle{
+		bridge:           b,
+		listener:         l,
+		staticMaxRunners: ssCfg.MaxRunners,
+	}
+
+	// Recompute shares on every VM create/complete so GitHub's view of
+	// per-scale-set capacity stays in sync with the shared worker pool.
+	b.SetOnVMChange(func() {
+		m.recomputeScaleSetShares(ctx)
+	})
+
 	m.bridgesMu.Lock()
-	m.bridges = append(m.bridges, b)
+	m.handles = append(m.handles, handle)
 	m.bridgesMu.Unlock()
+
+	// Hydrate activeVMs from any existing Orchard VMs for this scale set,
+	// and reserve the corresponding capacity slots. Must happen before
+	// listener.Run, which is the only caller of HandleDesiredRunnerCount.
+	if adopted, herr := b.HydrateFromOrchard(ctx); herr != nil {
+		logger.Warn("hydrate from orchard failed", "error", herr)
+	} else if adopted > 0 {
+		logger.Info("adopted existing VMs from orchard", "count", adopted)
+		m.capacity.AdoptExisting(adopted)
+	}
+
+	// After hydration, run one share recompute so initial maxRunners
+	// reflects existing cross-scale-set load.
+	m.recomputeScaleSetShares(ctx)
 
 	// Run the listener (blocks until context cancelled)
 	logger.Info("listening for jobs", "maxRunners", maxRunners)
@@ -314,4 +353,92 @@ func (m *Manager) registerScaleSet(ctx context.Context, ghClient *scaleset.Clien
 // Capacity returns the shared capacity tracker, exposed for health checks.
 func (m *Manager) Capacity() *brdg.Capacity {
 	return m.capacity
+}
+
+// recomputeScaleSetShares recalculates each scale set's share of the shared
+// worker pool and pushes the new value to its listener as maxRunners. The
+// share is: (label-matched worker capacity) − (active managed VMs of OTHER
+// scale sets on those same workers). Self-active VMs aren't subtracted because
+// GitHub's listener already accounts for runners it has dispatched to us.
+//
+// Scale sets with a statically-configured MaxRunners are left alone.
+func (m *Manager) recomputeScaleSetShares(ctx context.Context) {
+	snap, err := m.state.Get(ctx)
+	if snap == nil {
+		if err != nil {
+			m.logger.Debug("skip share recompute: no snapshot", "error", err)
+		}
+		return
+	}
+
+	m.bridgesMu.Lock()
+	handles := make([]*scaleSetHandle, len(m.handles))
+	copy(handles, m.handles)
+	m.bridgesMu.Unlock()
+
+	for _, h := range handles {
+		if h.staticMaxRunners > 0 {
+			continue
+		}
+		labels := h.bridge.VMLabels()
+		workerCap := brdg.CapacityForLabels(snap.Workers, labels)
+		othersActive := 0
+		for _, other := range handles {
+			if other == h {
+				continue
+			}
+			for _, vm := range snap.ManagedVMsForScaleSet(other.bridge.ScaleSetName()) {
+				if vm.Status == orchard.VMStatusStopped || vm.Status == orchard.VMStatusFailed {
+					continue
+				}
+				if vmConsumesLabeledWorker(vm, snap.Workers, labels) {
+					othersActive++
+				}
+			}
+		}
+		share := workerCap - othersActive
+		if share < 0 {
+			share = 0
+		}
+		m.logger.Info("updating maxRunners",
+			"scaleSet", h.bridge.ScaleSetName(),
+			"share", share,
+			"workerCap", workerCap,
+			"othersActive", othersActive,
+		)
+		h.listener.SetMaxRunners(share)
+	}
+}
+
+// vmConsumesLabeledWorker returns true if vm occupies a slot on a worker
+// whose labels match vmLabels. Pending VMs (no worker assignment yet) are
+// counted if their own Labels would match a label-matching worker.
+func vmConsumesLabeledWorker(vm orchard.VM, workers []orchard.Worker, vmLabels map[string]string) bool {
+	if vm.Worker != "" {
+		for _, w := range workers {
+			if w.Name != vm.Worker {
+				continue
+			}
+			return workerMatchesAllLabels(w, vmLabels)
+		}
+		return false
+	}
+	// Pending VM: if its own labels would select any of our label-matching
+	// workers, count it (belt-and-suspenders — otherwise an in-flight VM
+	// for another scale set wouldn't be visible until Orchard places it).
+	for _, w := range workers {
+		if workerMatchesAllLabels(w, vm.Labels) && workerMatchesAllLabels(w, vmLabels) {
+			return true
+		}
+	}
+	return false
+}
+
+func workerMatchesAllLabels(w orchard.Worker, want map[string]string) bool {
+	for k, v := range want {
+		if w.Labels[k] != v {
+			return false
+		}
+	}
+	return true
 }

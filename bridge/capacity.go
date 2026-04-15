@@ -70,11 +70,23 @@ func (c *Capacity) InUse() int {
 }
 
 // Reconcile sets the in-use count to the given value. Used by the cleanup
-// goroutine to correct drift between tracked and actual VM counts.
+// goroutine to correct drift between tracked and actual VM counts. Does not
+// clamp at max — if actual > max, Available() goes negative and TryAcquire
+// blocks until the backlog drains. This surfaces over-provisioning instead of
+// hiding it.
 func (c *Capacity) Reconcile(actual int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.current = min(actual, c.max)
+	c.current = actual
+}
+
+// AdoptExisting adds n slots to the in-use count without gating on max.
+// Used at startup when a bridge hydrates active VMs that already exist in
+// Orchard from a previous process instance.
+func (c *Capacity) AdoptExisting(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.current += n
 }
 
 // SetMax updates the global maximum capacity and notifies listeners

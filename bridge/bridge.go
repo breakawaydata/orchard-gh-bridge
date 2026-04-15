@@ -24,10 +24,15 @@ type Bridge struct {
 	orchardClient orchard.Client
 	ghClient      *scaleset.Client
 	capacity      *Capacity
+	state         *StateView
 	logger        *slog.Logger
 
+	// onVMChange is invoked after a successful create or release so the manager
+	// can recompute per-scale-set maxRunners reported to GitHub. May be nil.
+	onVMChange func()
+
 	mu        sync.Mutex
-	activeVMs map[string]string // runnerName → vmName
+	activeVMs map[string]string // runnerName or vmName → vmName
 }
 
 type Config struct {
@@ -37,6 +42,7 @@ type Config struct {
 	OrchardClient orchard.Client
 	GHClient      *scaleset.Client
 	Capacity      *Capacity
+	State         *StateView
 	Logger        *slog.Logger
 }
 
@@ -48,13 +54,57 @@ func New(cfg Config) *Bridge {
 		orchardClient: cfg.OrchardClient,
 		ghClient:      cfg.GHClient,
 		capacity:      cfg.Capacity,
+		state:         cfg.State,
 		logger:        cfg.Logger.With("scaleSet", cfg.ScaleSetName),
 		activeVMs:     make(map[string]string),
 	}
 }
 
-// HandleDesiredRunnerCount is called by the listener when GitHub reports desired runner count.
-// We provision new VMs for the delta, respecting global capacity.
+// SetOnVMChange registers a callback invoked after a VM is created or released.
+func (b *Bridge) SetOnVMChange(fn func()) {
+	b.onVMChange = fn
+}
+
+// ScaleSetName returns the configured scale set name.
+func (b *Bridge) ScaleSetName() string { return b.scaleSetName }
+
+// VMLabels returns the VM label selector used for worker matching.
+func (b *Bridge) VMLabels() map[string]string { return b.vmConfig.Labels }
+
+// HydrateFromOrchard populates activeVMs from existing managed VMs in Orchard
+// that belong to this scale set. Returns the number of VMs adopted so the
+// caller can reserve those slots in the shared Capacity. Called once before
+// the listener starts — before HandleDesiredRunnerCount can fire.
+func (b *Bridge) HydrateFromOrchard(ctx context.Context) (int, error) {
+	if b.state == nil {
+		return 0, nil
+	}
+	snap, err := b.state.Get(ctx)
+	if snap == nil {
+		return 0, err
+	}
+	vms := snap.ManagedVMsForScaleSet(b.scaleSetName)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	adopted := 0
+	for _, vm := range vms {
+		if vm.Status == orchard.VMStatusStopped || vm.Status == orchard.VMStatusFailed {
+			continue
+		}
+		// Key by VM name — the runner name is only known after GitHub registers
+		// the runner. HandleJobCompleted looks up by runner name and already
+		// tolerates misses; cleanup will reap the VM when the job ends.
+		b.activeVMs[vm.Name] = vm.Name
+		adopted++
+	}
+	return adopted, err
+}
+
+// HandleDesiredRunnerCount is called by the listener when GitHub reports the
+// desired runner count. We provision VMs only up to the real free slots on
+// label-matching Orchard workers. Anything beyond that stays in GitHub's
+// queue and gets picked up once a slot frees.
 func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
 	b.mu.Lock()
 	currentActive := len(b.activeVMs)
@@ -65,9 +115,33 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 		return currentActive, nil
 	}
 
+	// Authoritative check: real free slots on label-matching workers. Uses
+	// the shared StateView so the two bridges see a consistent view of what's
+	// already in-flight.
+	if b.state != nil {
+		snap, err := b.state.Get(ctx)
+		if snap == nil {
+			b.logger.Warn("no orchard snapshot, skipping scale-up", "error", err)
+			return currentActive, nil
+		}
+		workerCap := CapacityForLabels(snap.Workers, b.vmConfig.Labels)
+		managedMatching := countActiveVMs(snap.ManagedVMsMatchingLabels(b.vmConfig.Labels))
+		free := workerCap - managedMatching
+		if free <= 0 {
+			b.logger.Info("no free worker slots for labels",
+				"needed", needed, "workerCap", workerCap, "managedMatching", managedMatching)
+			return currentActive, nil
+		}
+		if needed > free {
+			needed = free
+		}
+	}
+
+	// Global semaphore is retained as a second-line guardrail against runaway
+	// bugs (e.g. misconfigured labels matching zero workers slipping past above).
 	acquired := b.capacity.TryAcquire(needed)
 	if acquired == 0 {
-		b.logger.Warn("no capacity available", "needed", needed, "currentActive", currentActive)
+		b.logger.Warn("global capacity exhausted", "needed", needed, "currentActive", currentActive)
 		return currentActive, nil
 	}
 
@@ -83,6 +157,7 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 		if err != nil {
 			b.logger.Error("failed to generate JIT config", "error", err)
 			b.capacity.Release(acquired - created)
+			b.notifyChange()
 			return currentActive + created, fmt.Errorf("generating JIT config: %w", err)
 		}
 
@@ -101,6 +176,7 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 		if _, err := b.orchardClient.CreateVM(ctx, vm); err != nil {
 			b.logger.Error("failed to create VM", "vm", vmName, "error", err)
 			b.capacity.Release(acquired - created)
+			b.notifyChange()
 			return currentActive + created, fmt.Errorf("creating VM %s: %w", vmName, err)
 		}
 
@@ -112,7 +188,30 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 		b.logger.Info("created VM", "vm", vmName, "image", b.vmConfig.Image)
 	}
 
+	if b.state != nil {
+		b.state.Invalidate()
+	}
+	b.notifyChange()
+
 	return currentActive + created, nil
+}
+
+func (b *Bridge) notifyChange() {
+	if b.onVMChange != nil {
+		b.onVMChange()
+	}
+}
+
+// countActiveVMs returns VMs that are not in terminal states.
+func countActiveVMs(vms []orchard.VM) int {
+	n := 0
+	for _, vm := range vms {
+		if vm.Status == orchard.VMStatusStopped || vm.Status == orchard.VMStatusFailed {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // HandleJobStarted is called when a job starts on a runner. The VM is already running.
@@ -158,6 +257,10 @@ func (b *Bridge) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCo
 	}
 
 	b.capacity.Release(1)
+	if b.state != nil {
+		b.state.Invalidate()
+	}
+	b.notifyChange()
 	return nil
 }
 

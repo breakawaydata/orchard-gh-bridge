@@ -20,18 +20,24 @@ func IsManagedVM(name string) bool {
 // VMName generates a unique, k8s-label-safe VM name.
 // Format: gha-{scaleSetName}-{shortUUID}, max 63 chars.
 func VMName(scaleSetName string) string {
-	sanitized := strings.ToLower(scaleSetName)
-	sanitized = nonAlphanumHyphen.ReplaceAllString(sanitized, "-")
-	sanitized = strings.Trim(sanitized, "-")
-
 	short := uuid.New().String()[:8]
-	name := fmt.Sprintf("%s%s-%s", vmNamePrefix, sanitized, short)
+	name := fmt.Sprintf("%s%s", VMNamePrefixForScaleSet(scaleSetName), short)
 
 	if len(name) > 63 {
 		name = name[:63]
 		name = strings.TrimRight(name, "-")
 	}
 	return name
+}
+
+// VMNamePrefixForScaleSet returns the deterministic name prefix VMName generates
+// for a given scale set. Used to match existing Orchard VMs back to a scale set
+// when hydrating state after a bridge restart.
+func VMNamePrefixForScaleSet(scaleSetName string) string {
+	sanitized := strings.ToLower(scaleSetName)
+	sanitized = nonAlphanumHyphen.ReplaceAllString(sanitized, "-")
+	sanitized = strings.Trim(sanitized, "-")
+	return vmNamePrefix + sanitized + "-"
 }
 
 // StartupScript generates the bash script injected into the Orchard VM.
