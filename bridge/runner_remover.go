@@ -21,5 +21,8 @@ func (r *ScaleSetRunnerRemover) RemoveRunnerByName(ctx context.Context, name str
 	if err != nil {
 		return fmt.Errorf("looking up runner %q: %w", name, err)
 	}
+	if runner == nil {
+		return nil
+	}
 	return r.client.RemoveRunner(ctx, int64(runner.ID))
 }

@@ -58,3 +58,35 @@ func TestCapacity_Reconcile(t *testing.T) {
 		t.Errorf("InUse = %d, want 1", got)
 	}
 }
+
+func TestCapacity_ReconcileSurfacesOverProvisioning(t *testing.T) {
+	c := NewCapacity(4)
+	c.TryAcquire(2)
+	c.Reconcile(10) // actual > max — do not clamp
+
+	if got := c.InUse(); got != 10 {
+		t.Errorf("InUse = %d, want 10", got)
+	}
+	if got := c.Available(); got != -6 {
+		t.Errorf("Available = %d, want -6", got)
+	}
+	if got := c.TryAcquire(1); got != 0 {
+		t.Errorf("TryAcquire(1) = %d, want 0 (over-provisioned)", got)
+	}
+}
+
+func TestCapacity_AdoptExisting(t *testing.T) {
+	c := NewCapacity(4)
+	c.AdoptExisting(3)
+	if got := c.InUse(); got != 3 {
+		t.Errorf("InUse = %d, want 3", got)
+	}
+	// Adoption may exceed max without error — caller is responsible.
+	c.AdoptExisting(5)
+	if got := c.InUse(); got != 8 {
+		t.Errorf("InUse = %d, want 8", got)
+	}
+	if got := c.TryAcquire(1); got != 0 {
+		t.Errorf("TryAcquire(1) = %d, want 0", got)
+	}
+}

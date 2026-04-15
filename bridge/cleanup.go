@@ -11,6 +11,12 @@ import (
 const (
 	DefaultCleanupInterval = 60 * time.Second
 	DefaultMaxVMAge        = 2 * time.Hour
+	// DefaultMaxPendingAge is how long a managed VM may sit in "creating"
+	// (Orchard's wire-level "pending") before cleanup reaps it. Comfortably
+	// above image pull + runner download + register (~1–3 min typical). Stuck
+	// pending VMs otherwise occupy a capacity slot until DefaultMaxVMAge,
+	// starving the queue.
+	DefaultMaxPendingAge = 10 * time.Minute
 )
 
 // RunnerRemover deregisters GitHub Actions runner registrations.
@@ -22,11 +28,13 @@ type RunnerRemover interface {
 type Cleanup struct {
 	orchardClient orchard.Client
 	capacity      *Capacity
+	state         *StateView
 	runnerRemover RunnerRemover
 	onVMCleaned   func(vmName string)
 	logger        *slog.Logger
 	interval      time.Duration
 	maxAge        time.Duration
+	maxPendingAge time.Duration
 }
 
 func NewCleanup(orchardClient orchard.Client, capacity *Capacity, runnerRemover RunnerRemover, logger *slog.Logger) *Cleanup {
@@ -37,8 +45,13 @@ func NewCleanup(orchardClient orchard.Client, capacity *Capacity, runnerRemover 
 		logger:        logger.With("component", "cleanup"),
 		interval:      DefaultCleanupInterval,
 		maxAge:        DefaultMaxVMAge,
+		maxPendingAge: DefaultMaxPendingAge,
 	}
 }
+
+// SetStateView wires in a shared StateView so sweep reads from the same
+// snapshot that scaling decisions use, and invalidates it after deletes.
+func (c *Cleanup) SetStateView(s *StateView) { c.state = s }
 
 // SetOnVMCleaned registers a callback invoked after a VM is reaped.
 // Used by the manager to notify bridges so they can purge stale activeVM entries.
@@ -62,7 +75,7 @@ func (c *Cleanup) Run(ctx context.Context) {
 }
 
 func (c *Cleanup) sweep(ctx context.Context) {
-	vms, err := c.orchardClient.ListVMs(ctx)
+	vms, workers, err := c.listVMsAndWorkers(ctx)
 	if err != nil {
 		c.logger.Error("failed to list VMs for cleanup", "error", err)
 		return
@@ -78,47 +91,101 @@ func (c *Cleanup) sweep(ctx context.Context) {
 		}
 		managedCount++
 
-		shouldDelete := false
-		reason := ""
-
-		switch vm.Status {
-		case orchard.VMStatusStopped:
-			shouldDelete = true
-			reason = "stopped"
-		case orchard.VMStatusFailed:
-			shouldDelete = true
-			reason = "failed"
-		default:
-			if !vm.CreatedAt.IsZero() && now.Sub(vm.CreatedAt) > c.maxAge {
-				shouldDelete = true
-				reason = "max age exceeded"
-			}
-		}
-
-		if shouldDelete {
-			c.logger.Info("cleaning up VM", "vm", vm.Name, "reason", reason, "status", vm.Status)
-			if err := c.orchardClient.DeleteVM(ctx, vm.Name); err != nil {
-				c.logger.Error("failed to delete VM during cleanup", "vm", vm.Name, "error", err)
-				continue
-			}
-			c.removeRunner(ctx, vm.Name)
-			if c.onVMCleaned != nil {
-				c.onVMCleaned(vm.Name)
-			}
+		if c.processVM(ctx, vm, now) {
 			deleted++
 			managedCount--
 		}
 	}
 
-	// Reconcile capacity with actual managed VM count
+	if deleted > 0 && c.state != nil {
+		c.state.Invalidate()
+	}
+
+	// Reconcile capacity with actual managed VM count. Does NOT clamp at max:
+	// if actual > max we want Available() to go negative until the backlog
+	// drains, so over-provisioning stays visible instead of silently hiding.
 	c.capacity.Reconcile(managedCount)
 
-	// Refresh max capacity from current workers
-	c.refreshMaxCapacity(ctx)
+	// Refresh max capacity from current workers, always — including the
+	// total=0 case. If all workers disappear, GitHub needs to see
+	// maxRunners=0 or it will keep dispatching jobs into a void.
+	c.pushMaxCapacity(workers)
 
 	if deleted > 0 {
 		c.logger.Info("cleanup sweep complete", "deleted", deleted, "remaining", managedCount)
 	}
+}
+
+func (c *Cleanup) listVMsAndWorkers(ctx context.Context) ([]orchard.VM, []orchard.Worker, error) {
+	if c.state != nil {
+		snap, err := c.state.Get(ctx)
+		if snap != nil {
+			return snap.VMs, snap.Workers, nil
+		}
+		return nil, nil, err
+	}
+	vms, err := c.orchardClient.ListVMs(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	workers, err := c.orchardClient.ListWorkers(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return vms, workers, nil
+}
+
+// processVM evaluates one VM and, if needed, deletes it and deregisters its runner.
+// Recovers from panics so a single bad record cannot kill the cleanup goroutine
+// and cascade into a full pod restart (which resets bridge state and causes
+// over-provisioning on the next boot).
+func (c *Cleanup) processVM(ctx context.Context, vm orchard.VM, now time.Time) (deleted bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Error("panic during VM cleanup, skipping", "vm", vm.Name, "panic", r)
+			deleted = false
+		}
+	}()
+
+	shouldDelete := false
+	reason := ""
+
+	switch vm.Status {
+	case orchard.VMStatusStopped:
+		shouldDelete = true
+		reason = "stopped"
+	case orchard.VMStatusFailed:
+		shouldDelete = true
+		reason = "failed"
+	case orchard.VMStatusCreating:
+		// Orchard's v1 API exposes "pending" and the client maps it to
+		// VMStatusCreating — so this case covers pending VMs that never get
+		// scheduled onto a worker. Reap them aggressively so the queue drains.
+		if !vm.CreatedAt.IsZero() && now.Sub(vm.CreatedAt) > c.maxPendingAge {
+			shouldDelete = true
+			reason = "stuck pending"
+		}
+	default:
+		if !vm.CreatedAt.IsZero() && now.Sub(vm.CreatedAt) > c.maxAge {
+			shouldDelete = true
+			reason = "max age exceeded"
+		}
+	}
+
+	if !shouldDelete {
+		return false
+	}
+
+	c.logger.Info("cleaning up VM", "vm", vm.Name, "reason", reason, "status", vm.Status)
+	if err := c.orchardClient.DeleteVM(ctx, vm.Name); err != nil {
+		c.logger.Error("failed to delete VM during cleanup", "vm", vm.Name, "error", err)
+		return false
+	}
+	c.removeRunner(ctx, vm.Name)
+	if c.onVMCleaned != nil {
+		c.onVMCleaned(vm.Name)
+	}
+	return true
 }
 
 func (c *Cleanup) removeRunner(ctx context.Context, name string) {
@@ -132,21 +199,14 @@ func (c *Cleanup) removeRunner(ctx context.Context, name string) {
 
 const resourceTartVMs = "org.cirruslabs.tart-vms"
 
-func (c *Cleanup) refreshMaxCapacity(ctx context.Context) {
-	workers, err := c.orchardClient.ListWorkers(ctx)
-	if err != nil {
-		c.logger.Error("failed to list workers for capacity refresh", "error", err)
-		return
-	}
+func (c *Cleanup) pushMaxCapacity(workers []orchard.Worker) {
 	var total int
 	for _, w := range workers {
 		if n, ok := w.Resources[resourceTartVMs]; ok {
 			total += int(n)
 		}
 	}
-	if total > 0 {
-		c.capacity.SetMax(total, workers)
-	}
+	c.capacity.SetMax(total, workers)
 }
 
 // CapacityForLabels computes the total tart-vms capacity across workers
