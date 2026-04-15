@@ -195,6 +195,25 @@ func TestSnapshot_ManagedVMsMatchingLabels_ViaWorker(t *testing.T) {
 	}
 }
 
+func TestSnapshot_ManagedVMsMatchingLabels_ExcludesMismatchedWorker(t *testing.T) {
+	// VM is placed on a worker whose labels don't match — it must NOT be
+	// counted just because its own Labels would select a matching worker.
+	snap := newSnapshot(
+		[]orchard.VM{
+			{Name: "gha-orchard-a", Worker: "amd-worker", Labels: map[string]string{"arch": "arm"}},
+		},
+		[]orchard.Worker{
+			{Name: "amd-worker", Labels: map[string]string{"arch": "amd"}},
+		},
+		time.Now(),
+	)
+
+	got := snap.ManagedVMsMatchingLabels(map[string]string{"arch": "arm"})
+	if len(got) != 0 {
+		t.Errorf("expected 0 matches (worker placement mismatches), got %+v", got)
+	}
+}
+
 func TestSnapshot_ManagedVMsMatchingLabels_FallbackToVMLabels(t *testing.T) {
 	snap := newSnapshot(
 		[]orchard.VM{
