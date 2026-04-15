@@ -202,6 +202,9 @@ const resourceTartVMs = "org.cirruslabs.tart-vms"
 func (c *Cleanup) pushMaxCapacity(workers []orchard.Worker) {
 	var total int
 	for _, w := range workers {
+		if w.SchedulingPaused {
+			continue
+		}
 		if n, ok := w.Resources[resourceTartVMs]; ok {
 			total += int(n)
 		}
@@ -210,10 +213,15 @@ func (c *Cleanup) pushMaxCapacity(workers []orchard.Worker) {
 }
 
 // CapacityForLabels computes the total tart-vms capacity across workers
-// whose labels are a superset of the given VM labels.
+// whose labels are a superset of the given VM labels. Workers with
+// SchedulingPaused set are excluded — Orchard will refuse to place VMs
+// on them, so counting their slots would over-report capacity.
 func CapacityForLabels(workers []orchard.Worker, vmLabels map[string]string) int {
 	var total int
 	for _, w := range workers {
+		if w.SchedulingPaused {
+			continue
+		}
 		if !workerMatchesLabels(w, vmLabels) {
 			continue
 		}

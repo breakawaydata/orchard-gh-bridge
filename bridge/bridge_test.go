@@ -204,6 +204,37 @@ func TestHandleDesired_BlocksWhenNoFreeSlots(t *testing.T) {
 	}
 }
 
+func TestHandleDesired_BlocksWhenOnlyMatchingWorkerPaused(t *testing.T) {
+	mock := newMockOrchard()
+	mock.workers = []orchard.Worker{
+		{Name: "arm", Resources: map[string]uint64{resourceTartVMs: 2}, Labels: map[string]string{"arch": "arm"}, SchedulingPaused: true},
+	}
+
+	cap := NewCapacity(10)
+	sv := NewStateView(mock, time.Minute)
+
+	// GHClient nil: if the gate leaks, JIT generation panics — test signal.
+	b := New(Config{
+		ScaleSetName:  "test",
+		VMConfig:      config.VMConfig{Labels: map[string]string{"arch": "arm"}},
+		OrchardClient: mock,
+		Capacity:      cap,
+		State:         sv,
+		Logger:        testLogger(),
+	})
+
+	got, err := b.HandleDesiredRunnerCount(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("HandleDesiredRunnerCount: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("active count = %d, want 0 (paused worker must not provide capacity)", got)
+	}
+	if mock.vmCount() != 0 {
+		t.Errorf("VM count = %d, want 0", mock.vmCount())
+	}
+}
+
 func TestHandleDesired_RespectsLabelsForCapacity(t *testing.T) {
 	mock := newMockOrchard()
 	mock.workers = []orchard.Worker{

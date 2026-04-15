@@ -51,3 +51,32 @@ func TestCleanup_SetMaxWhenAllWorkersGone(t *testing.T) {
 		t.Errorf("Max = %d, want 0 (must propagate zero capacity to listener)", got)
 	}
 }
+
+func TestCleanup_SetMaxExcludesPausedWorkers(t *testing.T) {
+	mock := newMockOrchard()
+	mock.workers = []orchard.Worker{
+		{Name: "live", Resources: map[string]uint64{resourceTartVMs: 3}},
+		{Name: "paused", Resources: map[string]uint64{resourceTartVMs: 5}, SchedulingPaused: true},
+	}
+
+	cap := NewCapacity(20)
+	cleanup := NewCleanup(mock, cap, nil, testLogger())
+	cleanup.sweep(context.Background())
+
+	if got := cap.Max(); got != 3 {
+		t.Errorf("Max = %d, want 3 (paused worker's 5 slots must not count)", got)
+	}
+}
+
+func TestCapacityForLabels_ExcludesPausedWorkers(t *testing.T) {
+	workers := []orchard.Worker{
+		{Name: "live", Resources: map[string]uint64{resourceTartVMs: 2}, Labels: map[string]string{"arch": "arm"}},
+		{Name: "paused", Resources: map[string]uint64{resourceTartVMs: 4}, Labels: map[string]string{"arch": "arm"}, SchedulingPaused: true},
+		{Name: "other-arch", Resources: map[string]uint64{resourceTartVMs: 8}, Labels: map[string]string{"arch": "amd"}},
+	}
+
+	got := CapacityForLabels(workers, map[string]string{"arch": "arm"})
+	if got != 2 {
+		t.Errorf("CapacityForLabels = %d, want 2 (only the live arm worker counts)", got)
+	}
+}
