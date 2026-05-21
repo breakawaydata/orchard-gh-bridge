@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -57,6 +58,54 @@ func TestAutoSizeEligible(t *testing.T) {
 	}
 }
 
+func TestAutoSizeEligibleWithReserves(t *testing.T) {
+	tests := []struct {
+		name       string
+		worker     orchard.Worker
+		reserveCPU uint64
+		reserveMem uint64
+		want       bool
+	}{
+		{
+			name:       "sufficient resources",
+			worker:     mkWorker("w1", 10, 16384, 1, nil),
+			reserveCPU: 4, reserveMem: 4096,
+			want: true,
+		},
+		{
+			name:       "cores exactly equal to reserve (not eligible)",
+			worker:     mkWorker("w1", 4, 16384, 1, nil),
+			reserveCPU: 4, reserveMem: 4096,
+			want: false,
+		},
+		{
+			name:       "memory exactly equal to reserve (not eligible)",
+			worker:     mkWorker("w1", 10, 4096, 1, nil),
+			reserveCPU: 4, reserveMem: 4096,
+			want: false,
+		},
+		{
+			name:       "cores less than reserve (not eligible)",
+			worker:     mkWorker("w1", 2, 16384, 1, nil),
+			reserveCPU: 4, reserveMem: 4096,
+			want: false,
+		},
+		{
+			name:       "ineligible base (no pin label)",
+			worker:     orchard.Worker{Name: "w1", Resources: map[string]uint64{resourceLogicalCores: 10, resourceMemoryMiB: 16384}},
+			reserveCPU: 4, reserveMem: 4096,
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := AutoSizeEligibleWithReserves(tc.worker, tc.reserveCPU, tc.reserveMem); got != tc.want {
+				t.Errorf("AutoSizeEligibleWithReserves = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWorkerCountForLabels(t *testing.T) {
 	workers := []orchard.Worker{
 		mkWorker("a", 10, 16384, 1, map[string]string{"class": "fat"}),
@@ -65,9 +114,24 @@ func TestWorkerCountForLabels(t *testing.T) {
 		// missing pin label — ineligible
 		{Name: "d", Labels: map[string]string{"class": "fat"}, Resources: map[string]uint64{resourceLogicalCores: 10, resourceMemoryMiB: 16384}},
 	}
-	got := WorkerCountForLabels(workers, map[string]string{"class": "fat"})
+	got := WorkerCountForLabels(workers, map[string]string{"class": "fat"}, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB)
 	if got != 2 {
 		t.Errorf("WorkerCountForLabels = %d, want 2 (a + b; d lacks pin label)", got)
+	}
+}
+
+func TestWorkerCountForLabels_ExcludesUndersizedWorkers(t *testing.T) {
+	// Workers a and b are label-matching and base-eligible; a is too small to
+	// satisfy the configured reserves, so only b should count.
+	workers := []orchard.Worker{
+		// 4 cores == reserveCPU(4): AutoSizedVM would error; must not be counted.
+		mkWorker("a", 4, 32768, 1, map[string]string{"class": "fat"}),
+		// 10 cores > reserveCPU(4): schedulable.
+		mkWorker("b", 10, 32768, 1, map[string]string{"class": "fat"}),
+	}
+	got := WorkerCountForLabels(workers, map[string]string{"class": "fat"}, 4, DefaultAutoSizeReserveMemoryMiB)
+	if got != 1 {
+		t.Errorf("WorkerCountForLabels = %d, want 1 (only b; a has cores == reserve)", got)
 	}
 }
 
@@ -85,7 +149,7 @@ func TestFreeAutoSizeWorkers_ExcludesAssigned(t *testing.T) {
 		{Name: "manual", Worker: "c", Status: orchard.VMStatusRunning},
 	}
 
-	free := freeAutoSizeWorkers(workers, vms, nil)
+	free := freeAutoSizeWorkers(workers, vms, nil, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB)
 	gotNames := make([]string, len(free))
 	for i, w := range free {
 		gotNames[i] = w.Name
@@ -108,7 +172,7 @@ func TestFreeAutoSizeWorkers_ExcludesPendingPinned(t *testing.T) {
 			Labels: map[string]string{PinLabelKey: "a"},
 		},
 	}
-	free := freeAutoSizeWorkers(workers, vms, nil)
+	free := freeAutoSizeWorkers(workers, vms, nil, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB)
 	if len(free) != 1 || free[0].Name != "b" {
 		t.Errorf("freeAutoSizeWorkers = %+v, want only [b]", free)
 	}
@@ -245,5 +309,101 @@ func TestHandleDesired_AutoSize_BlocksWhenWorkerIneligible(t *testing.T) {
 	}
 	if mock.vmCount() != 0 {
 		t.Errorf("VM count = %d, want 0", mock.vmCount())
+	}
+}
+
+func TestHandleDesired_AutoSize_BlocksWhenWorkersTooSmallForReserves(t *testing.T) {
+	mock := newMockOrchard()
+	// Worker has exactly DefaultAutoSizeReserveCPU cores — AutoSizedVM would
+	// error (cores <= reserveCPU). The reserve-aware filter must exclude it from
+	// the candidate list so GitHub capacity is reported as 0, not 1.
+	mock.workers = []orchard.Worker{
+		mkWorker("small", DefaultAutoSizeReserveCPU, 65536, 1, nil),
+	}
+
+	cap := NewCapacity(10)
+	sv := NewStateView(mock, time.Minute)
+
+	b := New(Config{
+		ScaleSetName: "test",
+		VMConfig: config.VMConfig{
+			AutoSize: config.AutoSizeConfig{
+				Enabled: true,
+				// Zero values → defaults applied: reserveCPU = DefaultAutoSizeReserveCPU.
+			},
+		},
+		OrchardClient: mock,
+		Capacity:      cap,
+		State:         sv,
+		Logger:        testLogger(),
+	})
+
+	got, err := b.HandleDesiredRunnerCount(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("HandleDesiredRunnerCount: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("active count = %d, want 0 (worker too small for reserves)", got)
+	}
+	if cap.InUse() != 0 {
+		t.Errorf("capacity in use = %d, want 0 (no slots should have been acquired)", cap.InUse())
+	}
+	if mock.vmCount() != 0 {
+		t.Errorf("VM count = %d, want 0", mock.vmCount())
+	}
+}
+
+// TestHandleDesired_AutoSize_CapacityReleasedCorrectlyOnCreateFailure verifies
+// that when createOneVM fails mid-batch, only the truly unaccounted slots are
+// released — not slots that were already individually released for skipped
+// workers. With acquired=2, created=1 succeeding then 1 failing, the error
+// path must Release(acquired - skipped - created) = Release(1), leaving
+// cap.InUse() = 1 (the successfully-created VM still holds its slot).
+//
+// The skip path (AutoSizedVM returning an error for a freeAutoSizeWorkers
+// candidate) is a TOCTOU defensive branch; freeAutoSizeWorkers now pre-filters
+// undersized workers, so skipped=0 in normal operation. This test exercises
+// the createOneVM-failure accounting with skipped=0 to confirm the fix.
+func TestHandleDesired_AutoSize_CapacityReleasedCorrectlyOnCreateFailure(t *testing.T) {
+	mock := newMockOrchard()
+	// Two large workers: both pass AutoSizeEligibleWithReserves → both candidates.
+	mock.workers = []orchard.Worker{
+		mkWorker("w1", 10, 32768, 1, nil),
+		mkWorker("w2", 10, 32768, 1, nil),
+	}
+
+	cap := NewCapacity(10)
+	sv := NewStateView(mock, time.Minute)
+
+	b := New(Config{
+		ScaleSetName: "test",
+		VMConfig: config.VMConfig{
+			AutoSize: config.AutoSizeConfig{Enabled: true},
+		},
+		OrchardClient: mock,
+		Capacity:      cap,
+		State:         sv,
+		Logger:        testLogger(),
+	})
+
+	// First createOneVM call succeeds (created=1); second fails.
+	callCount := 0
+	b.testCreateOneVM = func(_ context.Context, _, _ uint64, _ map[string]string, _ []any) error {
+		callCount++
+		if callCount == 1 {
+			return nil
+		}
+		return errors.New("injected create failure")
+	}
+
+	_, err := b.HandleDesiredRunnerCount(context.Background(), 2)
+	if err == nil {
+		t.Fatal("expected error from HandleDesiredRunnerCount, got nil")
+	}
+
+	// acquired=2, skipped=0, created=1 → Release(2-0-1)=Release(1)
+	// cap.InUse() must be 1 (the first VM still holds its slot).
+	if got := cap.InUse(); got != 1 {
+		t.Errorf("cap.InUse() = %d, want 1 (one VM created, one slot released on error)", got)
 	}
 }

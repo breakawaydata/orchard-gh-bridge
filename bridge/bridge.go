@@ -31,6 +31,10 @@ type Bridge struct {
 	// can recompute per-scale-set maxRunners reported to GitHub. May be nil.
 	onVMChange func()
 
+	// testCreateOneVM, when non-nil, replaces createOneVM in scale-up loops.
+	// Used only in unit tests to inject failures without a real GitHub client.
+	testCreateOneVM func(ctx context.Context, cpu, memory uint64, labels map[string]string, logExtras []any) error
+
 	mu        sync.Mutex
 	activeVMs map[string]string // runnerName or vmName → vmName
 }
@@ -74,6 +78,13 @@ func (b *Bridge) VMLabels() map[string]string { return b.vmConfig.Labels }
 // AutoSizeEnabled reports whether this bridge sizes VMs from worker resources
 // (true) or from the static vm.cpu / vm.memory config (false).
 func (b *Bridge) AutoSizeEnabled() bool { return b.vmConfig.AutoSize.Enabled }
+
+// AutoSizeReserveConfig returns the raw (possibly zero) reserve values from
+// the scale set config. Callers should pass these to AutoSizeReserves to apply
+// defaults before use.
+func (b *Bridge) AutoSizeReserveConfig() (reserveCPU, reserveMemMiB uint64) {
+	return b.vmConfig.AutoSize.ReserveCPU, b.vmConfig.AutoSize.ReserveMemoryMiB
+}
 
 // HydrateFromOrchard populates activeVMs from existing managed VMs in Orchard
 // that belong to this scale set. Returns the number of VMs adopted so the
@@ -187,7 +198,9 @@ func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActiv
 		return currentActive, nil
 	}
 
-	candidates := freeAutoSizeWorkers(snap.Workers, snap.VMs, b.vmConfig.Labels)
+	reserveCPU, reserveMem := AutoSizeReserves(b.vmConfig.AutoSize.ReserveCPU, b.vmConfig.AutoSize.ReserveMemoryMiB)
+
+	candidates := freeAutoSizeWorkers(snap.Workers, snap.VMs, b.vmConfig.Labels, reserveCPU, reserveMem)
 	if len(candidates) == 0 {
 		b.logger.Info("no free autoSize workers", "needed", needed)
 		return currentActive, nil
@@ -202,8 +215,6 @@ func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActiv
 		return currentActive, nil
 	}
 
-	reserveCPU, reserveMem := AutoSizeReserves(b.vmConfig.AutoSize.ReserveCPU, b.vmConfig.AutoSize.ReserveMemoryMiB)
-
 	b.logger.Info("scaling up (autoSize)",
 		"needed", needed,
 		"acquired", acquired,
@@ -212,18 +223,20 @@ func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActiv
 	)
 
 	created := 0
+	skipped := 0
 	for i := 0; i < acquired; i++ {
 		w := candidates[i]
 		cpu, mem, err := AutoSizedVM(w, reserveCPU, reserveMem)
 		if err != nil {
 			b.logger.Warn("skipping worker for autoSize", "worker", w.Name, "error", err)
 			b.capacity.Release(1)
+			skipped++
 			continue
 		}
 		labels := mergePinLabel(b.vmConfig.Labels, w.Name)
 		extra := []any{"worker", w.Name, "cpu", cpu, "memoryMiB", mem}
-		if err := b.createOneVM(ctx, cpu, mem, labels, extra); err != nil {
-			b.capacity.Release(acquired - created)
+		if err := b.doCreateOneVM(ctx, cpu, mem, labels, extra); err != nil {
+			b.capacity.Release(acquired - skipped - created)
 			b.notifyChange()
 			return currentActive + created, err
 		}
@@ -277,6 +290,15 @@ func (b *Bridge) createOneVM(ctx context.Context, cpu, memory uint64, labels map
 	args = append(args, logExtras...)
 	b.logger.Info("created VM", args...)
 	return nil
+}
+
+// doCreateOneVM calls createOneVM, or the testCreateOneVM hook when set.
+// The hook is set only in unit tests to avoid requiring a real GitHub client.
+func (b *Bridge) doCreateOneVM(ctx context.Context, cpu, memory uint64, labels map[string]string, logExtras []any) error {
+	if b.testCreateOneVM != nil {
+		return b.testCreateOneVM(ctx, cpu, memory, labels, logExtras)
+	}
+	return b.createOneVM(ctx, cpu, memory, labels, logExtras)
 }
 
 // mergePinLabel returns a copy of base with PinLabelKey set to workerName.
