@@ -189,6 +189,7 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 	// Wait for matching workers before creating the session so GitHub
 	// never sees maxCapacity=0 (which causes it to skip routing jobs
 	// to the scale set even after capacity increases).
+	capacityFn := workerCapacityFn(ssCfg.VM.AutoSize.Enabled, ssCfg.VM.AutoSize.ReserveCPU, ssCfg.VM.AutoSize.ReserveMemoryMiB)
 	var maxRunners int
 	if ssCfg.MaxRunners > 0 {
 		maxRunners = ssCfg.MaxRunners
@@ -197,7 +198,7 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 		if err != nil {
 			logger.Warn("failed to list workers for initial capacity", "error", err)
 		} else {
-			maxRunners = brdg.CapacityForLabels(workers, ssCfg.VM.Labels)
+			maxRunners = capacityFn(workers, ssCfg.VM.Labels)
 		}
 
 		if maxRunners == 0 {
@@ -213,13 +214,13 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 					logger.Warn("failed to list workers while waiting", "error", err)
 					continue
 				}
-				maxRunners = brdg.CapacityForLabels(workers, ssCfg.VM.Labels)
+				maxRunners = capacityFn(workers, ssCfg.VM.Labels)
 				if maxRunners > 0 {
 					break
 				}
 			}
 		}
-		logger.Info("initial maxRunners from matching workers", "maxRunners", maxRunners)
+		logger.Info("initial maxRunners from matching workers", "maxRunners", maxRunners, "autoSize", ssCfg.VM.AutoSize.Enabled)
 	}
 
 	// Create message session with retry (GitHub sessions have a TTL and may
@@ -387,7 +388,9 @@ func (m *Manager) recomputeScaleSetShares(ctx context.Context) {
 			continue
 		}
 		labels := h.bridge.VMLabels()
-		workerCap := brdg.CapacityForLabels(snap.Workers, labels)
+		reserveCPU, reserveMemMiB := h.bridge.AutoSizeReserveConfig()
+		capacityFn := workerCapacityFn(h.bridge.AutoSizeEnabled(), reserveCPU, reserveMemMiB)
+		workerCap := capacityFn(snap.Workers, labels)
 		othersActive := 0
 		for _, other := range handles {
 			if other == h {
@@ -411,9 +414,24 @@ func (m *Manager) recomputeScaleSetShares(ctx context.Context) {
 			"share", share,
 			"workerCap", workerCap,
 			"othersActive", othersActive,
+			"autoSize", h.bridge.AutoSizeEnabled(),
 		)
 		h.listener.SetMaxRunners(share)
 	}
+}
+
+// workerCapacityFn returns the capacity-counting function for a scale set:
+// per-worker count when AutoSize is on (one VM per worker, filtered by
+// reserves so undersized workers are not reported as schedulable), or sum of
+// tart-vms slots otherwise.
+func workerCapacityFn(autoSize bool, reserveCPU, reserveMemMiB uint64) func([]orchard.Worker, map[string]string) int {
+	if autoSize {
+		cpu, mem := brdg.AutoSizeReserves(reserveCPU, reserveMemMiB)
+		return func(workers []orchard.Worker, labels map[string]string) int {
+			return brdg.WorkerCountForLabels(workers, labels, cpu, mem)
+		}
+	}
+	return brdg.CapacityForLabels
 }
 
 // vmConsumesLabeledWorker returns true if vm occupies a slot on a worker
