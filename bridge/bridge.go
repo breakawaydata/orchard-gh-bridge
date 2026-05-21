@@ -71,6 +71,10 @@ func (b *Bridge) ScaleSetName() string { return b.scaleSetName }
 // VMLabels returns the VM label selector used for worker matching.
 func (b *Bridge) VMLabels() map[string]string { return b.vmConfig.Labels }
 
+// AutoSizeEnabled reports whether this bridge sizes VMs from worker resources
+// (true) or from the static vm.cpu / vm.memory config (false).
+func (b *Bridge) AutoSizeEnabled() bool { return b.vmConfig.AutoSize.Enabled }
+
 // HydrateFromOrchard populates activeVMs from existing managed VMs in Orchard
 // that belong to this scale set. Returns the number of VMs adopted so the
 // caller can reserve those slots in the shared Capacity. Called once before
@@ -115,6 +119,10 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 		return currentActive, nil
 	}
 
+	if b.vmConfig.AutoSize.Enabled {
+		return b.handleAutoSizeScaleUp(ctx, needed, currentActive)
+	}
+
 	// Authoritative check: real free slots on label-matching workers. Uses
 	// the shared StateView so the two bridges see a consistent view of what's
 	// already in-flight.
@@ -149,43 +157,13 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 
 	created := 0
 	for range acquired {
-		vmName := VMName(b.scaleSetName)
-
-		jitConfig, err := b.ghClient.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{
-			Name: vmName,
-		}, b.scaleSetID)
+		err := b.createOneVM(ctx, b.vmConfig.CPU, b.vmConfig.Memory, b.vmConfig.Labels, nil)
 		if err != nil {
-			b.logger.Error("failed to generate JIT config", "error", err)
 			b.capacity.Release(acquired - created)
 			b.notifyChange()
-			return currentActive + created, fmt.Errorf("generating JIT config: %w", err)
+			return currentActive + created, err
 		}
-
-		script := StartupScript(jitConfig.EncodedJITConfig, b.vmConfig.DockerPort)
-		vm := &orchard.VM{
-			Name:   vmName,
-			Image:  b.vmConfig.Image,
-			CPU:    b.vmConfig.CPU,
-			Memory: b.vmConfig.Memory,
-			Labels: b.vmConfig.Labels,
-			StartupScript: &orchard.VMScript{
-				ScriptContent: script,
-			},
-		}
-
-		if _, err := b.orchardClient.CreateVM(ctx, vm); err != nil {
-			b.logger.Error("failed to create VM", "vm", vmName, "error", err)
-			b.capacity.Release(acquired - created)
-			b.notifyChange()
-			return currentActive + created, fmt.Errorf("creating VM %s: %w", vmName, err)
-		}
-
-		b.mu.Lock()
-		b.activeVMs[vmName] = vmName
-		b.mu.Unlock()
-
 		created++
-		b.logger.Info("created VM", "vm", vmName, "image", b.vmConfig.Image)
 	}
 
 	if b.state != nil {
@@ -194,6 +172,123 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 	b.notifyChange()
 
 	return currentActive + created, nil
+}
+
+// handleAutoSizeScaleUp creates one VM per free worker, sized from each
+// worker's advertised resources. Pinned to the chosen worker via PinLabelKey.
+func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActive int) (int, error) {
+	if b.state == nil {
+		b.logger.Warn("autoSize requires a StateView; skipping scale-up")
+		return currentActive, nil
+	}
+	snap, err := b.state.Get(ctx)
+	if snap == nil {
+		b.logger.Warn("no orchard snapshot, skipping autoSize scale-up", "error", err)
+		return currentActive, nil
+	}
+
+	candidates := freeAutoSizeWorkers(snap.Workers, snap.VMs, b.vmConfig.Labels)
+	if len(candidates) == 0 {
+		b.logger.Info("no free autoSize workers", "needed", needed)
+		return currentActive, nil
+	}
+	if needed > len(candidates) {
+		needed = len(candidates)
+	}
+
+	acquired := b.capacity.TryAcquire(needed)
+	if acquired == 0 {
+		b.logger.Warn("global capacity exhausted (autoSize)", "needed", needed, "currentActive", currentActive)
+		return currentActive, nil
+	}
+
+	reserveCPU, reserveMem := AutoSizeReserves(b.vmConfig.AutoSize.ReserveCPU, b.vmConfig.AutoSize.ReserveMemoryMiB)
+
+	b.logger.Info("scaling up (autoSize)",
+		"needed", needed,
+		"acquired", acquired,
+		"candidates", len(candidates),
+		"currentActive", currentActive,
+	)
+
+	created := 0
+	for i := 0; i < acquired; i++ {
+		w := candidates[i]
+		cpu, mem, err := AutoSizedVM(w, reserveCPU, reserveMem)
+		if err != nil {
+			b.logger.Warn("skipping worker for autoSize", "worker", w.Name, "error", err)
+			b.capacity.Release(1)
+			continue
+		}
+		labels := mergePinLabel(b.vmConfig.Labels, w.Name)
+		extra := []any{"worker", w.Name, "cpu", cpu, "memoryMiB", mem}
+		if err := b.createOneVM(ctx, cpu, mem, labels, extra); err != nil {
+			b.capacity.Release(acquired - created)
+			b.notifyChange()
+			return currentActive + created, err
+		}
+		created++
+	}
+
+	if b.state != nil {
+		b.state.Invalidate()
+	}
+	b.notifyChange()
+
+	return currentActive + created, nil
+}
+
+// createOneVM generates a JIT runner config, builds the VM spec, and creates
+// the VM in Orchard. Tracks success in activeVMs; callers handle capacity
+// release on error and the StateView invalidation after a batch.
+func (b *Bridge) createOneVM(ctx context.Context, cpu, memory uint64, labels map[string]string, logExtras []any) error {
+	vmName := VMName(b.scaleSetName)
+
+	jitConfig, err := b.ghClient.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{
+		Name: vmName,
+	}, b.scaleSetID)
+	if err != nil {
+		b.logger.Error("failed to generate JIT config", "vm", vmName, "error", err)
+		return fmt.Errorf("generating JIT config: %w", err)
+	}
+
+	script := StartupScript(jitConfig.EncodedJITConfig, b.vmConfig.DockerPort)
+	vm := &orchard.VM{
+		Name:   vmName,
+		Image:  b.vmConfig.Image,
+		CPU:    cpu,
+		Memory: memory,
+		Labels: labels,
+		StartupScript: &orchard.VMScript{
+			ScriptContent: script,
+		},
+	}
+
+	if _, err := b.orchardClient.CreateVM(ctx, vm); err != nil {
+		b.logger.Error("failed to create VM", "vm", vmName, "error", err)
+		return fmt.Errorf("creating VM %s: %w", vmName, err)
+	}
+
+	b.mu.Lock()
+	b.activeVMs[vmName] = vmName
+	b.mu.Unlock()
+
+	args := []any{"vm", vmName, "image", b.vmConfig.Image}
+	args = append(args, logExtras...)
+	b.logger.Info("created VM", args...)
+	return nil
+}
+
+// mergePinLabel returns a copy of base with PinLabelKey set to workerName.
+// Avoids mutating the caller's map (b.vmConfig.Labels is shared with the
+// scale set config and is read by other goroutines).
+func mergePinLabel(base map[string]string, workerName string) map[string]string {
+	out := make(map[string]string, len(base)+1)
+	for k, v := range base {
+		out[k] = v
+	}
+	out[PinLabelKey] = workerName
+	return out
 }
 
 func (b *Bridge) notifyChange() {

@@ -49,6 +49,27 @@ type VMConfig struct {
 	Memory     uint64            `yaml:"memory"`
 	DockerPort int               `yaml:"dockerPort"`
 	Labels     map[string]string `yaml:"labels"`
+	AutoSize   AutoSizeConfig    `yaml:"autoSize,omitempty"`
+}
+
+// AutoSizeConfig opts a scale set into per-host VM sizing.
+//
+// When Enabled, vm.cpu and vm.memory are ignored. Instead, each VM is sized
+// from its target worker's advertised `org.cirruslabs.logical-cores` and
+// `org.cirruslabs.memory-mib` resources, minus the configured reserves.
+// The defaults (4 cores + 4096 MiB held back) leave room for macOS, the
+// orchard-worker daemon, and a default Colima Docker VM on the host. If your
+// Colima profile is bigger, bump ReserveCPU / ReserveMemoryMiB.
+//
+// The bridge selects a free worker per VM and pins placement via a label
+// matching the worker's own Orchard Name. Each AutoSize-eligible worker
+// must therefore self-label with that name (see README's "Worker setup"
+// section for the convention). One managed VM per worker is enforced by
+// the bridge regardless of the worker's tart-vms slot count.
+type AutoSizeConfig struct {
+	Enabled          bool   `yaml:"enabled"`
+	ReserveCPU       uint64 `yaml:"reserveCPU"`
+	ReserveMemoryMiB uint64 `yaml:"reserveMemoryMiB"`
 }
 
 type HealthConfig struct {

@@ -162,6 +162,43 @@ The bridge tracks VM capacity with a global semaphore shared across all scale se
 - **Static override:** Set `maxVMs` in config to a fixed number to override auto-detection.
 - **Per-scale-set limits:** Set `maxRunners` on individual scale sets to cap them independently of the global limit.
 
+### Per-host VM sizing (AutoSize)
+
+By default `vm.cpu` and `vm.memory` are fixed per scale set, so every VM in that scale set gets the same allocation regardless of the host it lands on. That wastes capacity on heterogeneous fleets (e.g. one 10-core Mac Mini next to a 12-core MacBook Pro).
+
+Setting `vm.autoSize.enabled: true` on a scale set switches it to per-host sizing:
+
+```yaml
+scaleSets:
+  - name: macos-tahoe-xcode-26.4-large
+    labels: [macOS, ARM64, macos-tahoe-xcode-26.4-large]
+    vm:
+      image: ghcr.io/cirruslabs/macos-tahoe-xcode:26.4.1
+      dockerPort: 2375
+      autoSize:
+        enabled: true
+        reserveCPU: 4         # Held back for macOS + orchard-worker + Colima
+        reserveMemoryMiB: 4096
+```
+
+When AutoSize is on:
+
+- `vm.cpu` and `vm.memory` are ignored. Each VM is created with `cpu = workerCores − reserveCPU`, `memory = workerMemoryMiB − reserveMemoryMiB`.
+- The bridge picks one VM per worker and pins placement via a label, so a worker's full resources go to one VM at a time — regardless of its `tart-vms` slot count.
+- Per-scale-set capacity is reported to GitHub as the count of label-matching workers, not the sum of their slots.
+- The defaults (4 cores / 4096 MiB reserve) leave room for macOS, the orchard-worker daemon, and a default Colima Docker VM on the host. Bump them if your Colima profile is bigger.
+
+**Worker setup for AutoSize:** each eligible worker must self-label with its own Orchard Name so the bridge can pin a VM there. The label key is `orchard-gh-bridge/worker-name`:
+
+```bash
+orchard worker run \
+  --name my-mac-mini-1 \
+  --labels "vm-class-large=true,orchard-gh-bridge/worker-name=my-mac-mini-1" \
+  --resources "org.cirruslabs.tart-vms:1,org.cirruslabs.logical-cores:10,org.cirruslabs.memory-mib:16384"
+```
+
+The bridge logs `created autoSize VM ... worker=<name> cpu=<n> memoryMiB=<n>` for each provisioning, so the chosen size is visible in real time.
+
 ### Stateless design
 
 The bridge is stateless -- all persistent state lives in Orchard and GitHub. If the bridge restarts:

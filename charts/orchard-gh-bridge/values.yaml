@@ -89,6 +89,10 @@ config:
     #     labels: {}           # Orchard worker-affinity labels for VM placement
     #       # nested-virt: "true"   # Only schedule on workers with this label
     #       # vm-class: "large"     # Route to workers with matching memory class
+    #     autoSize:            # Per-host VM sizing — ignores cpu/memory above.
+    #       enabled: false     # Each VM gets the host's cores/memory minus the reserves below.
+    #       reserveCPU: 4      # Held back for macOS + orchard-worker + Colima. Default 4.
+    #       reserveMemoryMiB: 4096  # Held back for host overhead. Default 4096.
   health:
     port: 8080
   metrics:
