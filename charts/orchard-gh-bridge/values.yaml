@@ -65,6 +65,11 @@ affinity: {}
 config:
   logLevel: info
   maxVMs: 0  # 0 = auto-detect from connected workers' tart-vms capacity
+  # maxVMAge is the cleanup safety timeout after which a managed VM is reaped
+  # regardless of job state (Go duration, e.g. "4h"). Empty = 2h default. Set it
+  # above the longest consuming job's `timeout-minutes` so the GitHub job timeout
+  # governs and this stays a runaway backstop.
+  # maxVMAge: ""
   orchard:
     address: "http://orchard-controller:6120"
     username: "bootstrap-admin"

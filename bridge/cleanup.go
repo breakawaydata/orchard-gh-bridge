@@ -53,6 +53,17 @@ func NewCleanup(orchardClient orchard.Client, capacity *Capacity, runnerRemover 
 // snapshot that scaling decisions use, and invalidates it after deletes.
 func (c *Cleanup) SetStateView(s *StateView) { c.state = s }
 
+// SetMaxAge overrides the age at which managed VMs are reaped. Non-positive
+// values are ignored, preserving the DefaultMaxVMAge safety timeout. Set this
+// above the longest expected job runtime so a long-but-legitimate job (e.g. a
+// 2h+ nightly E2E suite) is governed by GitHub's per-job timeout instead of
+// being killed mid-run by this backstop.
+func (c *Cleanup) SetMaxAge(maxAge time.Duration) {
+	if maxAge > 0 {
+		c.maxAge = maxAge
+	}
+}
+
 // SetOnVMCleaned registers a callback invoked after a VM is reaped.
 // Used by the manager to notify bridges so they can purge stale activeVM entries.
 func (c *Cleanup) SetOnVMCleaned(fn func(vmName string)) {

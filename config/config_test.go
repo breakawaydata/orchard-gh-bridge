@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoad_ValidConfig(t *testing.T) {
@@ -94,6 +95,65 @@ scaleSets:
 	}
 	if cfg.Orchard.Username != "bootstrap-admin" {
 		t.Errorf("Orchard.Username = %q, want bootstrap-admin", cfg.Orchard.Username)
+	}
+}
+
+func TestLoad_MaxVMAge(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+maxVMAge: 4h
+orchard:
+  address: http://localhost:6120
+github:
+  token: ghp_test
+scaleSets:
+  - name: test
+    githubConfigURL: https://github.com/org
+    vm:
+      image: test-image
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.MaxVMAgeDuration(); got != 4*time.Hour {
+		t.Errorf("MaxVMAgeDuration = %v, want 4h", got)
+	}
+}
+
+func TestLoad_MaxVMAgeUnsetIsZero(t *testing.T) {
+	cfg := &Config{}
+	if got := cfg.MaxVMAgeDuration(); got != 0 {
+		t.Errorf("MaxVMAgeDuration = %v, want 0 when unset", got)
+	}
+}
+
+func TestLoad_MaxVMAgeInvalid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+maxVMAge: not-a-duration
+orchard:
+  address: http://localhost:6120
+github:
+  token: ghp_test
+scaleSets:
+  - name: test
+    githubConfigURL: https://github.com/org
+    vm:
+      image: test-image
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for invalid maxVMAge duration")
 	}
 }
 
