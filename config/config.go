@@ -5,13 +5,20 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	LogLevel  string           `yaml:"logLevel"`
-	MaxVMs    int              `yaml:"maxVMs"`
+	LogLevel string `yaml:"logLevel"`
+	MaxVMs   int    `yaml:"maxVMs"`
+	// MaxVMAge overrides the safety timeout after which the cleanup loop reaps
+	// a managed VM regardless of job state (a Go duration string, e.g. "4h").
+	// Empty keeps the built-in default (bridge.DefaultMaxVMAge, 2h). Set it
+	// above the longest consuming repo's GitHub job `timeout-minutes` so the
+	// job-level timeout governs and this stays a runaway backstop.
+	MaxVMAge  string           `yaml:"maxVMAge"`
 	Orchard   OrchardConfig    `yaml:"orchard"`
 	GitHub    GitHubConfig     `yaml:"github"`
 	ScaleSets []ScaleSetConfig `yaml:"scaleSets"`
@@ -158,6 +165,14 @@ func (c *Config) Validate() error {
 		errs = append(errs, "orchard.address is required")
 	}
 
+	if c.MaxVMAge != "" {
+		if d, err := time.ParseDuration(c.MaxVMAge); err != nil {
+			errs = append(errs, fmt.Sprintf("maxVMAge %q is not a valid duration: %v", c.MaxVMAge, err))
+		} else if d <= 0 {
+			errs = append(errs, "maxVMAge must be a positive duration")
+		}
+	}
+
 	hasApp := c.GitHub.AppID != 0 && c.GitHub.InstallationID != 0 &&
 		(c.GitHub.PrivateKey != "" || c.GitHub.PrivateKeyPath != "")
 	hasPAT := c.GitHub.Token != ""
@@ -186,6 +201,17 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// MaxVMAgeDuration returns the configured VM reaping age, or 0 when unset
+// (callers keep their default). Validate guarantees a non-empty value parses,
+// so the parse error is intentionally ignored here.
+func (c *Config) MaxVMAgeDuration() time.Duration {
+	if c.MaxVMAge == "" {
+		return 0
+	}
+	d, _ := time.ParseDuration(c.MaxVMAge)
+	return d
 }
 
 func (c *Config) GitHubPrivateKeyPEM() (string, error) {

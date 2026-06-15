@@ -66,7 +66,7 @@ Kubernetes cluster
    - Runs the runner with the JIT config, which connects to GitHub and picks up the assigned job
 7. When the job completes, the bridge **deletes the VM** from Orchard and **deregisters the runner** from GitHub.
 8. A background **cleanup goroutine** runs every 60 seconds to:
-   - Reap VMs that are stopped, failed, or exceed a 2-hour safety timeout
+   - Reap VMs that are stopped, failed, or exceed a safety timeout (default 2h, override with `maxVMAge`)
    - Deregister stale GitHub runner registrations for cleaned-up VMs
    - Refresh the maximum capacity from connected workers' `org.cirruslabs.tart-vms` resources
    - Reconcile the in-use capacity count with actual VM count in Orchard
@@ -365,6 +365,7 @@ See [charts/orchard-gh-bridge/values.yaml](charts/orchard-gh-bridge/values.yaml)
 | `config.github` | `appID`, `installationID`, `privateKeyPath`, `token` |
 | `config.scaleSets[]` | `name`, `githubConfigURL`, `labels`, `maxRunners`, `vm.image`, `vm.cpu`, `vm.memory`, `vm.nested`, `vm.labels` |
 | `config.maxVMs` | Global VM capacity cap (0 = auto-detect from workers) |
+| `config.maxVMAge` | VM reaping safety timeout as a Go duration, e.g. `4h` (empty = 2h default). Set above the longest consuming job's `timeout-minutes` so the job timeout governs and this stays a backstop. |
 | `existingSecret` | Name of a pre-created K8s Secret |
 | `externalSecret` | External Secrets Operator config |
 | `metrics` | Prometheus ServiceMonitor config |

@@ -141,6 +141,10 @@ func (m *Manager) Run(ctx context.Context) error {
 	// Start cleanup goroutine
 	cleanup := brdg.NewCleanup(m.orchardClient, m.capacity, runnerRemover, m.logger)
 	cleanup.SetStateView(m.state)
+	if maxAge := m.cfg.MaxVMAgeDuration(); maxAge > 0 {
+		cleanup.SetMaxAge(maxAge)
+		m.logger.Info("overriding VM reaping age from config", "maxVMAge", maxAge)
+	}
 	cleanup.SetOnVMCleaned(func(vmName string) {
 		m.bridgesMu.Lock()
 		handles := make([]*scaleSetHandle, len(m.handles))

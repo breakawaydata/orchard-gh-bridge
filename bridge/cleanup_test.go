@@ -80,3 +80,46 @@ func TestCapacityForLabels_ExcludesPausedWorkers(t *testing.T) {
 		t.Errorf("CapacityForLabels = %d, want 2 (only the live arm worker counts)", got)
 	}
 }
+
+func TestCleanup_SetMaxAgeExtendsReapWindow(t *testing.T) {
+	// A running VM older than the 2h default but within a raised 4h window must
+	// NOT be reaped once SetMaxAge widens the safety timeout. This is the fix
+	// for nightly E2E suites that legitimately run >2h (the macOS VM was being
+	// killed mid-run at the 2h DefaultMaxVMAge backstop).
+	newVM := func() *orchard.VM {
+		return &orchard.VM{
+			Name:      "gha-orchard-test-long",
+			Status:    orchard.VMStatusRunning,
+			CreatedAt: time.Now().Add(-3 * time.Hour),
+		}
+	}
+
+	// Default 2h max age reaps the 3h-old running VM.
+	mockDefault := newMockOrchard()
+	mockDefault.vms["gha-orchard-test-long"] = newVM()
+	def := NewCleanup(mockDefault, NewCapacity(4), nil, testLogger())
+	def.sweep(context.Background())
+	if _, err := mockDefault.GetVM(context.Background(), "gha-orchard-test-long"); err == nil {
+		t.Errorf("with default 2h maxAge, a 3h-old VM should have been reaped")
+	}
+
+	// Raised 4h max age keeps it.
+	mockRaised := newMockOrchard()
+	mockRaised.vms["gha-orchard-test-long"] = newVM()
+	raised := NewCleanup(mockRaised, NewCapacity(4), nil, testLogger())
+	raised.SetMaxAge(4 * time.Hour)
+	raised.sweep(context.Background())
+	if _, err := mockRaised.GetVM(context.Background(), "gha-orchard-test-long"); err != nil {
+		t.Errorf("with 4h maxAge, a 3h-old VM should remain: %v", err)
+	}
+
+	// A non-positive override is ignored, preserving the default backstop.
+	mockZero := newMockOrchard()
+	mockZero.vms["gha-orchard-test-long"] = newVM()
+	zero := NewCleanup(mockZero, NewCapacity(4), nil, testLogger())
+	zero.SetMaxAge(0)
+	zero.sweep(context.Background())
+	if _, err := mockZero.GetVM(context.Background(), "gha-orchard-test-long"); err == nil {
+		t.Errorf("SetMaxAge(0) must be ignored, so the 3h-old VM is still reaped at the 2h default")
+	}
+}
