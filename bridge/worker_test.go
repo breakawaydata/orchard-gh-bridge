@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -113,5 +114,89 @@ func TestNewSnapshot_DropsStaleWorkers(t *testing.T) {
 	// resurrect a worker the capacity math already wrote off.
 	if _, ok := snap.workersByName["gone"]; ok {
 		t.Error("workersByName still indexes the stale worker")
+	}
+}
+
+// TestCleanup_StrandedVMDoesNotBlockHealthyWorker guards the accounting
+// symmetry that filtering stale workers depends on.
+//
+// Dropping a stale worker removes its slots from max. If the VM still pinned to
+// that worker kept counting toward current, Available() would fall by one for
+// every stranded VM — so with two one-slot workers and one stranded VM,
+// max=1/current=1 leaves zero available and the healthy worker cannot take a
+// replacement until maxAge (2h by default) reaps the VM.
+func TestCleanup_StrandedVMDoesNotBlockHealthyWorker(t *testing.T) {
+	now := time.Now()
+	mock := newMockOrchard()
+	mock.workers = []orchard.Worker{
+		{
+			Name:      "live-worker",
+			LastSeen:  now.Add(-2 * time.Second),
+			Resources: map[string]uint64{resourceTartVMs: 1},
+		},
+		{
+			Name:      "gone-worker",
+			LastSeen:  now.Add(-time.Hour),
+			Resources: map[string]uint64{resourceTartVMs: 1},
+		},
+	}
+	// Still "running" to Orchard: nothing stopped it, its host just left.
+	mock.vms["gha-orchard-test-stranded"] = &orchard.VM{
+		Name:      "gha-orchard-test-stranded",
+		Status:    orchard.VMStatusRunning,
+		Worker:    "gone-worker",
+		CreatedAt: now,
+	}
+
+	cap := NewCapacity(0)
+	cleanup := NewCleanup(mock, cap, nil, testLogger())
+	cleanup.SetStateView(NewStateView(mock, time.Minute, DefaultWorkerStaleAfter))
+	cleanup.sweep(context.Background())
+
+	if got := cap.Max(); got != 1 {
+		t.Fatalf("Max = %d, want 1 (only the live worker's slot)", got)
+	}
+	if got := cap.InUse(); got != 0 {
+		t.Errorf("InUse = %d, want 0 (the stranded VM's worker is excluded from Max too)", got)
+	}
+	if got := cap.Available(); got != 1 {
+		t.Errorf("Available = %d, want 1; the healthy worker must still be able to take a job", got)
+	}
+
+	// The VM itself is left alone — maxAge is the backstop, and it must come
+	// back into the count if its worker returns.
+	if _, err := mock.GetVM(context.Background(), "gha-orchard-test-stranded"); err != nil {
+		t.Errorf("stranded VM should not be reaped by this path: %v", err)
+	}
+}
+
+// The mirror case: a VM on a live worker still occupies a slot.
+func TestCleanup_VMOnLiveWorkerStillCounts(t *testing.T) {
+	now := time.Now()
+	mock := newMockOrchard()
+	mock.workers = []orchard.Worker{
+		{
+			Name:      "live-worker",
+			LastSeen:  now.Add(-2 * time.Second),
+			Resources: map[string]uint64{resourceTartVMs: 1},
+		},
+	}
+	mock.vms["gha-orchard-test-busy"] = &orchard.VM{
+		Name:      "gha-orchard-test-busy",
+		Status:    orchard.VMStatusRunning,
+		Worker:    "live-worker",
+		CreatedAt: now,
+	}
+
+	cap := NewCapacity(0)
+	cleanup := NewCleanup(mock, cap, nil, testLogger())
+	cleanup.SetStateView(NewStateView(mock, time.Minute, DefaultWorkerStaleAfter))
+	cleanup.sweep(context.Background())
+
+	if got := cap.InUse(); got != 1 {
+		t.Errorf("InUse = %d, want 1", got)
+	}
+	if got := cap.Available(); got != 0 {
+		t.Errorf("Available = %d, want 0 (the only slot is busy)", got)
 	}
 }

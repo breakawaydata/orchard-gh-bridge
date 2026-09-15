@@ -95,17 +95,39 @@ func (c *Cleanup) sweep(ctx context.Context) {
 	now := time.Now()
 	managedCount := 0
 	var deleted int
+	var orphaned int
+
+	// workers is already the live set, so a VM pinned to a name that is not in
+	// it is stranded on a machine that has gone away.
+	liveWorkers := make(map[string]struct{}, len(workers))
+	for _, w := range workers {
+		liveWorkers[w.Name] = struct{}{}
+	}
 
 	for _, vm := range vms {
 		if !IsManagedVM(vm.Name) {
 			continue
 		}
-		managedCount++
 
 		if c.processVM(ctx, vm, now) {
 			deleted++
-			managedCount--
+			continue
 		}
+
+		// A VM stranded on a worker that is no longer live must not be counted
+		// as in use. Its worker's slots are already excluded from max by
+		// pushMaxCapacity, so counting the VM would shrink max and leave
+		// current unchanged — Available() would drop by one for every stranded
+		// VM, blocking healthy workers from taking replacements until maxAge
+		// reaped it. Both sides of the accounting drop the same machine.
+		if vm.Worker != "" {
+			if _, ok := liveWorkers[vm.Worker]; !ok {
+				orphaned++
+				continue
+			}
+		}
+
+		managedCount++
 	}
 
 	if deleted > 0 && c.state != nil {
@@ -121,6 +143,14 @@ func (c *Cleanup) sweep(ctx context.Context) {
 	// total=0 case. If all workers disappear, GitHub needs to see
 	// maxRunners=0 or it will keep dispatching jobs into a void.
 	c.pushMaxCapacity(workers)
+
+	if orphaned > 0 {
+		// Not an error: the VM is reaped by the maxAge backstop, or resumes
+		// counting if its worker comes back. Logged because a persistent count
+		// here means a machine left the fleet without its VMs being cleaned up.
+		c.logger.Info("managed VMs stranded on workers that are no longer live",
+			"count", orphaned)
+	}
 
 	if deleted > 0 {
 		c.logger.Info("cleanup sweep complete", "deleted", deleted, "remaining", managedCount)
