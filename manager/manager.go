@@ -31,6 +31,9 @@ type Manager struct {
 	logger        *slog.Logger
 	capacity      *brdg.Capacity
 	state         *brdg.StateView
+	// staleAfter is the worker heartbeat age past which a worker stops
+	// counting as capacity. Shared with state so every path agrees.
+	staleAfter time.Duration
 
 	// newGHClient creates a scaleset client for the given config URL.
 	// Extracted for testing.
@@ -45,7 +48,7 @@ func New(cfg *config.Config, orchardClient orchard.Client, logger *slog.Logger) 
 
 	maxVMs := cfg.MaxVMs
 	if maxVMs == 0 {
-		total, err := discoverCapacity(context.Background(), orchardClient)
+		total, err := discoverCapacity(context.Background(), orchardClient, cfg.WorkerStaleAfterDuration())
 		if err != nil {
 			mgrLogger.Warn("failed to discover worker capacity, starting with 0", "error", err)
 		} else if total == 0 {
@@ -56,12 +59,18 @@ func New(cfg *config.Config, orchardClient orchard.Client, logger *slog.Logger) 
 		maxVMs = total
 	}
 
+	staleAfter := cfg.WorkerStaleAfterDuration()
+	if staleAfter <= 0 {
+		staleAfter = brdg.DefaultWorkerStaleAfter
+	}
+
 	m := &Manager{
 		cfg:           cfg,
 		orchardClient: orchardClient,
 		logger:        mgrLogger,
 		capacity:      brdg.NewCapacity(maxVMs),
-		state:         brdg.NewStateView(orchardClient, brdg.DefaultStateViewTTL),
+		state:         brdg.NewStateView(orchardClient, brdg.DefaultStateViewTTL, staleAfter),
+		staleAfter:    staleAfter,
 	}
 
 	m.newGHClient = m.defaultNewGHClient
@@ -70,13 +79,27 @@ func New(cfg *config.Config, orchardClient orchard.Client, logger *slog.Logger) 
 
 const resourceTartVMs = "org.cirruslabs.tart-vms"
 
-func discoverCapacity(ctx context.Context, client orchard.Client) (int, error) {
+// listLiveWorkers is ListWorkers minus workers that have stopped heartbeating,
+// matching what StateView snapshots expose so the startup capacity probes and
+// the steady-state share recompute cannot disagree about the fleet.
+func (m *Manager) listLiveWorkers(ctx context.Context) ([]orchard.Worker, error) {
+	workers, err := m.orchardClient.ListWorkers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return brdg.LiveWorkers(workers, m.staleAfter, time.Now()), nil
+}
+
+func discoverCapacity(ctx context.Context, client orchard.Client, staleAfter time.Duration) (int, error) {
 	workers, err := client.ListWorkers(ctx)
 	if err != nil {
 		return 0, err
 	}
+	if staleAfter <= 0 {
+		staleAfter = brdg.DefaultWorkerStaleAfter
+	}
 	var total int
-	for _, w := range workers {
+	for _, w := range brdg.LiveWorkers(workers, staleAfter, time.Now()) {
 		if n, ok := w.Resources[resourceTartVMs]; ok {
 			total += int(n)
 		}
@@ -198,7 +221,7 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 	if ssCfg.MaxRunners > 0 {
 		maxRunners = ssCfg.MaxRunners
 	} else {
-		workers, err := m.orchardClient.ListWorkers(ctx)
+		workers, err := m.listLiveWorkers(ctx)
 		if err != nil {
 			logger.Warn("failed to list workers for initial capacity", "error", err)
 		} else {
@@ -213,7 +236,7 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 					return ctx.Err()
 				case <-time.After(10 * time.Second):
 				}
-				workers, err := m.orchardClient.ListWorkers(ctx)
+				workers, err := m.listLiveWorkers(ctx)
 				if err != nil {
 					logger.Warn("failed to list workers while waiting", "error", err)
 					continue

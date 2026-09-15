@@ -17,9 +17,16 @@ const DefaultStateViewTTL = 5 * time.Second
 
 // Snapshot is an atomic view of Orchard state used by scaling decisions and cleanup.
 type Snapshot struct {
-	VMs       []orchard.VM
-	Workers   []orchard.Worker
-	FetchedAt time.Time
+	VMs []orchard.VM
+	// Workers holds only workers still heartbeating as of FetchedAt. Every
+	// capacity and placement decision reads this, so a machine that has gone
+	// away stops being counted as a slot the moment it stops pinging.
+	Workers []orchard.Worker
+	// AllWorkers is the unfiltered list as returned by Orchard, including
+	// workers filtered out of Workers for staleness. Diagnostics only — do not
+	// make capacity decisions from it.
+	AllWorkers []orchard.Worker
+	FetchedAt  time.Time
 
 	// workersByName is an index built once at snapshot construction so
 	// ManagedVMsMatchingLabels can look up a VM's assigned worker without
@@ -32,19 +39,26 @@ type Snapshot struct {
 // singleflight so a burst of HandleDesiredRunnerCount calls produces one
 // round-trip to Orchard.
 type StateView struct {
-	client orchard.Client
-	ttl    time.Duration
+	client     orchard.Client
+	ttl        time.Duration
+	staleAfter time.Duration
 
 	mu         sync.Mutex
 	snap       *Snapshot
 	refreshing chan struct{} // non-nil while a refresh is in-flight
 }
 
-func NewStateView(client orchard.Client, ttl time.Duration) *StateView {
+// NewStateView builds a shared state cache. staleAfter is the heartbeat age
+// past which a worker stops counting as capacity; non-positive selects
+// DefaultWorkerStaleAfter.
+func NewStateView(client orchard.Client, ttl, staleAfter time.Duration) *StateView {
 	if ttl <= 0 {
 		ttl = DefaultStateViewTTL
 	}
-	return &StateView{client: client, ttl: ttl}
+	if staleAfter <= 0 {
+		staleAfter = DefaultWorkerStaleAfter
+	}
+	return &StateView{client: client, ttl: ttl, staleAfter: staleAfter}
 }
 
 // Get returns a snapshot no older than ttl. If the current snapshot is fresh,
@@ -119,17 +133,22 @@ func (s *StateView) refresh(ctx context.Context) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newSnapshot(vms, workers, time.Now()), nil
+	return newSnapshot(vms, workers, time.Now(), s.staleAfter), nil
 }
 
-func newSnapshot(vms []orchard.VM, workers []orchard.Worker, at time.Time) *Snapshot {
-	idx := make(map[string]*orchard.Worker, len(workers))
-	for i := range workers {
-		idx[workers[i].Name] = &workers[i]
+// newSnapshot drops workers that have stopped heartbeating before anything can
+// read them. Filtering here rather than at each call site means capacity,
+// placement and cleanup all share one definition of "worker that exists".
+func newSnapshot(vms []orchard.VM, workers []orchard.Worker, at time.Time, staleAfter time.Duration) *Snapshot {
+	live := LiveWorkers(workers, staleAfter, at)
+	idx := make(map[string]*orchard.Worker, len(live))
+	for i := range live {
+		idx[live[i].Name] = &live[i]
 	}
 	return &Snapshot{
 		VMs:           vms,
-		Workers:       workers,
+		Workers:       live,
+		AllWorkers:    workers,
 		FetchedAt:     at,
 		workersByName: idx,
 	}

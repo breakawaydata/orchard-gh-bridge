@@ -50,7 +50,7 @@ func (c *countingOrchard) ListWorkers(ctx context.Context) ([]orchard.Worker, er
 
 func TestStateView_CachesWithinTTL(t *testing.T) {
 	c := newCountingOrchard()
-	sv := NewStateView(c, time.Minute)
+	sv := NewStateView(c, time.Minute, DefaultWorkerStaleAfter)
 
 	for i := 0; i < 5; i++ {
 		if _, err := sv.Get(context.Background()); err != nil {
@@ -65,7 +65,7 @@ func TestStateView_CachesWithinTTL(t *testing.T) {
 
 func TestStateView_RefreshesAfterTTL(t *testing.T) {
 	c := newCountingOrchard()
-	sv := NewStateView(c, 5*time.Millisecond)
+	sv := NewStateView(c, 5*time.Millisecond, DefaultWorkerStaleAfter)
 
 	if _, err := sv.Get(context.Background()); err != nil {
 		t.Fatalf("Get: %v", err)
@@ -82,7 +82,7 @@ func TestStateView_RefreshesAfterTTL(t *testing.T) {
 
 func TestStateView_InvalidateForcesRefresh(t *testing.T) {
 	c := newCountingOrchard()
-	sv := NewStateView(c, time.Minute)
+	sv := NewStateView(c, time.Minute, DefaultWorkerStaleAfter)
 
 	if _, err := sv.Get(context.Background()); err != nil {
 		t.Fatalf("Get: %v", err)
@@ -100,7 +100,7 @@ func TestStateView_InvalidateForcesRefresh(t *testing.T) {
 func TestStateView_CoalescesConcurrentRefreshes(t *testing.T) {
 	c := newCountingOrchard()
 	c.blockList = make(chan struct{})
-	sv := NewStateView(c, time.Minute)
+	sv := NewStateView(c, time.Minute, DefaultWorkerStaleAfter)
 
 	var wg sync.WaitGroup
 	const n = 10
@@ -127,7 +127,7 @@ func TestStateView_CoalescesConcurrentRefreshes(t *testing.T) {
 func TestStateView_ReturnsLastSnapshotOnRefreshError(t *testing.T) {
 	c := newCountingOrchard()
 	c.vms["gha-orchard-test-1"] = &orchard.VM{Name: "gha-orchard-test-1", Status: orchard.VMStatusRunning}
-	sv := NewStateView(c, 5*time.Millisecond)
+	sv := NewStateView(c, 5*time.Millisecond, DefaultWorkerStaleAfter)
 
 	snap1, err := sv.Get(context.Background())
 	if err != nil {
@@ -158,7 +158,7 @@ func TestSnapshot_ManagedVMsForScaleSet(t *testing.T) {
 		{Name: "gha-orchard-macos-tahoe-xcode-26-4-large-bbbb"},
 		{Name: "gha-orchard-other-cccc"},
 		{Name: "some-other-vm"},
-	}, nil, time.Now())
+	}, nil, time.Now(), DefaultWorkerStaleAfter)
 
 	got := snap.ManagedVMsForScaleSet("macos-tahoe-xcode-26.4")
 	if len(got) != 1 {
@@ -187,6 +187,7 @@ func TestSnapshot_ManagedVMsMatchingLabels_ViaWorker(t *testing.T) {
 			{Name: "w2", Labels: map[string]string{"arch": "amd"}},
 		},
 		time.Now(),
+		DefaultWorkerStaleAfter,
 	)
 
 	got := snap.ManagedVMsMatchingLabels(map[string]string{"arch": "arm"})
@@ -206,6 +207,7 @@ func TestSnapshot_ManagedVMsMatchingLabels_ExcludesMismatchedWorker(t *testing.T
 			{Name: "amd-worker", Labels: map[string]string{"arch": "amd"}},
 		},
 		time.Now(),
+		DefaultWorkerStaleAfter,
 	)
 
 	got := snap.ManagedVMsMatchingLabels(map[string]string{"arch": "arm"})
@@ -222,6 +224,7 @@ func TestSnapshot_ManagedVMsMatchingLabels_FallbackToVMLabels(t *testing.T) {
 		},
 		nil,
 		time.Now(),
+		DefaultWorkerStaleAfter,
 	)
 
 	got := snap.ManagedVMsMatchingLabels(map[string]string{"arch": "arm"})

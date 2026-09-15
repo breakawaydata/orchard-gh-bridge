@@ -199,6 +199,17 @@ orchard worker run \
 
 The bridge logs `created autoSize VM ... worker=<name> cpu=<n> memoryMiB=<n>` for each provisioning, so the chosen size is visible in real time.
 
+> **Keep `orchard-gh-bridge/worker-name` equal to `--name`, and re-check it after a
+> rename or a reinstall.** A machine that comes back under a new hostname registers
+> as a *new* worker and leaves the old registration behind. The stale one still
+> satisfies `label == name`, so it stays AutoSize-eligible and keeps counting as a
+> slot, while the live one (now `label != name`) is invisible to AutoSize even
+> though Orchard will still place label-pinned VMs on it. The bridge acquires a
+> real GitHub job for every VM it creates, so a phantom slot does not idle — it
+> repeatedly acquires jobs and hands them back. `workerStaleAfter` bounds the
+> damage, but the registration should be cleaned up with
+> `orchard delete worker <old-name>`.
+
 ### Stateless design
 
 The bridge is stateless -- all persistent state lives in Orchard and GitHub. If the bridge restarts:
@@ -366,6 +377,7 @@ See [charts/orchard-gh-bridge/values.yaml](charts/orchard-gh-bridge/values.yaml)
 | `config.scaleSets[]` | `name`, `githubConfigURL`, `labels`, `maxRunners`, `vm.image`, `vm.cpu`, `vm.memory`, `vm.nested`, `vm.labels` |
 | `config.maxVMs` | Global VM capacity cap (0 = auto-detect from workers) |
 | `config.maxVMAge` | VM reaping safety timeout as a Go duration, e.g. `4h` (empty = 2h default). Set above the longest consuming job's `timeout-minutes` so the job timeout governs and this stays a backstop. |
+| `config.workerStaleAfter` | How long an Orchard worker may go without a heartbeat before it stops counting as capacity (Go duration, e.g. `2m`; empty = 2m default). Raise only if your workers ping infrequently — below the ping interval it will flap. |
 | `existingSecret` | Name of a pre-created K8s Secret |
 | `externalSecret` | External Secrets Operator config |
 | `metrics` | Prometheus ServiceMonitor config |

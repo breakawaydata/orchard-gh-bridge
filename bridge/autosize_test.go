@@ -242,7 +242,7 @@ func TestHandleDesired_AutoSize_BlocksWhenAllWorkersAssigned(t *testing.T) {
 	}
 
 	cap := NewCapacity(10)
-	sv := NewStateView(mock, time.Minute)
+	sv := NewStateView(mock, time.Minute, DefaultWorkerStaleAfter)
 
 	b := New(Config{
 		ScaleSetName: "test",
@@ -287,7 +287,7 @@ func TestHandleDesired_AutoSize_BlocksWhenWorkerIneligible(t *testing.T) {
 	}
 
 	cap := NewCapacity(10)
-	sv := NewStateView(mock, time.Minute)
+	sv := NewStateView(mock, time.Minute, DefaultWorkerStaleAfter)
 
 	b := New(Config{
 		ScaleSetName: "test",
@@ -322,7 +322,7 @@ func TestHandleDesired_AutoSize_BlocksWhenWorkersTooSmallForReserves(t *testing.
 	}
 
 	cap := NewCapacity(10)
-	sv := NewStateView(mock, time.Minute)
+	sv := NewStateView(mock, time.Minute, DefaultWorkerStaleAfter)
 
 	b := New(Config{
 		ScaleSetName: "test",
@@ -373,7 +373,7 @@ func TestHandleDesired_AutoSize_CapacityReleasedCorrectlyOnCreateFailure(t *test
 	}
 
 	cap := NewCapacity(10)
-	sv := NewStateView(mock, time.Minute)
+	sv := NewStateView(mock, time.Minute, DefaultWorkerStaleAfter)
 
 	b := New(Config{
 		ScaleSetName: "test",
