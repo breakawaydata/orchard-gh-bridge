@@ -31,6 +31,10 @@ type Bridge struct {
 	// can recompute per-scale-set maxRunners reported to GitHub. May be nil.
 	onVMChange func()
 
+	// onDeleteFailed is invoked when deleting a finished job's VM fails, so the
+	// cleanup loop can keep retrying it. May be nil.
+	onDeleteFailed func(vmName string)
+
 	// testCreateOneVM, when non-nil, replaces createOneVM in scale-up loops.
 	// Used only in unit tests to inject failures without a real GitHub client.
 	testCreateOneVM func(ctx context.Context, cpu, memory uint64, labels map[string]string, logExtras []any) error
@@ -67,6 +71,12 @@ func New(cfg Config) *Bridge {
 // SetOnVMChange registers a callback invoked after a VM is created or released.
 func (b *Bridge) SetOnVMChange(fn func()) {
 	b.onVMChange = fn
+}
+
+// SetOnDeleteFailed registers a callback invoked when a finished job's VM could
+// not be deleted, so the caller can arrange a retry.
+func (b *Bridge) SetOnDeleteFailed(fn func(vmName string)) {
+	b.onDeleteFailed = fn
 }
 
 // ScaleSetName returns the configured scale set name.
@@ -364,8 +374,16 @@ func (b *Bridge) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCo
 	)
 
 	if err := b.orchardClient.DeleteVM(ctx, vmName); err != nil {
-		b.logger.Error("failed to delete VM", "vm", vmName, "error", err)
-		return err
+		// Deliberately not returned. This error travels up through the scale
+		// set listener and terminates the whole manager, so a few seconds of
+		// controller downtime — a node consolidation moving the pod is enough —
+		// would restart the bridge and drop every scale set's activeVMs
+		// tracking, orphaning their VMs. Hand it to cleanup and carry on.
+		b.logger.Error("failed to delete VM, queued for cleanup retry", "vm", vmName, "error", err)
+		if b.onDeleteFailed != nil {
+			b.onDeleteFailed(vmName)
+		}
+		return nil
 	}
 
 	// Deregister the runner from GitHub (best-effort)
