@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/breakawaydata/orchard-gh-bridge/orchard"
@@ -35,18 +36,68 @@ type Cleanup struct {
 	interval      time.Duration
 	maxAge        time.Duration
 	maxPendingAge time.Duration
+
+	// pendingMu guards pendingDeletes, which holds VMs whose delete already
+	// failed once (typically because the controller was briefly unreachable).
+	// The sweep retries these regardless of status, because a VM whose job has
+	// finished looks "running" to Orchard and would otherwise sit on a worker's
+	// only slot until maxAge.
+	pendingMu      sync.Mutex
+	pendingDeletes map[string]struct{}
 }
 
 func NewCleanup(orchardClient orchard.Client, capacity *Capacity, runnerRemover RunnerRemover, logger *slog.Logger) *Cleanup {
 	return &Cleanup{
-		orchardClient: orchardClient,
-		capacity:      capacity,
-		runnerRemover: runnerRemover,
-		logger:        logger.With("component", "cleanup"),
-		interval:      DefaultCleanupInterval,
-		maxAge:        DefaultMaxVMAge,
-		maxPendingAge: DefaultMaxPendingAge,
+		orchardClient:  orchardClient,
+		capacity:       capacity,
+		runnerRemover:  runnerRemover,
+		logger:         logger.With("component", "cleanup"),
+		interval:       DefaultCleanupInterval,
+		maxAge:         DefaultMaxVMAge,
+		maxPendingAge:  DefaultMaxPendingAge,
+		pendingDeletes: make(map[string]struct{}),
 	}
+}
+
+// MarkForDeletion queues a VM for deletion on the next sweep, and on every
+// sweep after that until it is gone. Callers use it when their own delete
+// failed and dropping the VM on the floor would leak a worker slot.
+func (c *Cleanup) MarkForDeletion(vmName string) {
+	if vmName == "" {
+		return
+	}
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	if c.pendingDeletes == nil {
+		c.pendingDeletes = make(map[string]struct{})
+	}
+	c.pendingDeletes[vmName] = struct{}{}
+}
+
+func (c *Cleanup) isPendingDelete(vmName string) bool {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	_, ok := c.pendingDeletes[vmName]
+	return ok
+}
+
+// retainPendingDeletes drops queued names that Orchard no longer reports, so a
+// VM that did get deleted (or one deleted by another path) cannot keep the
+// entry alive forever.
+func (c *Cleanup) retainPendingDeletes(seen map[string]struct{}) {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	for name := range c.pendingDeletes {
+		if _, ok := seen[name]; !ok {
+			delete(c.pendingDeletes, name)
+		}
+	}
+}
+
+func (c *Cleanup) clearPendingDelete(vmName string) {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	delete(c.pendingDeletes, vmName)
 }
 
 // SetStateView wires in a shared StateView so sweep reads from the same
@@ -96,6 +147,7 @@ func (c *Cleanup) sweep(ctx context.Context) {
 	managedCount := 0
 	var deleted int
 	var orphaned int
+	seen := make(map[string]struct{}, len(vms))
 
 	// workers is already the live set, so a VM pinned to a name that is not in
 	// it is stranded on a machine that has gone away.
@@ -108,6 +160,7 @@ func (c *Cleanup) sweep(ctx context.Context) {
 		if !IsManagedVM(vm.Name) {
 			continue
 		}
+		seen[vm.Name] = struct{}{}
 
 		if c.processVM(ctx, vm, now) {
 			deleted++
@@ -129,6 +182,8 @@ func (c *Cleanup) sweep(ctx context.Context) {
 
 		managedCount++
 	}
+
+	c.retainPendingDeletes(seen)
 
 	if deleted > 0 && c.state != nil {
 		c.state.Invalidate()
@@ -188,29 +243,12 @@ func (c *Cleanup) processVM(ctx context.Context, vm orchard.VM, now time.Time) (
 		}
 	}()
 
-	shouldDelete := false
-	reason := ""
-
-	switch vm.Status {
-	case orchard.VMStatusStopped:
-		shouldDelete = true
-		reason = "stopped"
-	case orchard.VMStatusFailed:
-		shouldDelete = true
-		reason = "failed"
-	case orchard.VMStatusCreating:
-		// Orchard's v1 API exposes "pending" and the client maps it to
-		// VMStatusCreating — so this case covers pending VMs that never get
-		// scheduled onto a worker. Reap them aggressively so the queue drains.
-		if !vm.CreatedAt.IsZero() && now.Sub(vm.CreatedAt) > c.maxPendingAge {
-			shouldDelete = true
-			reason = "stuck pending"
-		}
-	default:
-		if !vm.CreatedAt.IsZero() && now.Sub(vm.CreatedAt) > c.maxAge {
-			shouldDelete = true
-			reason = "max age exceeded"
-		}
+	// A VM queued by MarkForDeletion is deleted whatever its status says: its
+	// job is already over, so "running" here means a delete that did not land,
+	// not work in progress.
+	shouldDelete, reason := true, "retrying failed delete"
+	if !c.isPendingDelete(vm.Name) {
+		shouldDelete, reason = c.shouldDeleteByStatus(vm, now)
 	}
 
 	if !shouldDelete {
@@ -222,11 +260,34 @@ func (c *Cleanup) processVM(ctx context.Context, vm orchard.VM, now time.Time) (
 		c.logger.Error("failed to delete VM during cleanup", "vm", vm.Name, "error", err)
 		return false
 	}
+	c.clearPendingDelete(vm.Name)
 	c.removeRunner(ctx, vm.Name)
 	if c.onVMCleaned != nil {
 		c.onVMCleaned(vm.Name)
 	}
 	return true
+}
+
+// shouldDeleteByStatus applies the ordinary status-and-age reaping rules.
+func (c *Cleanup) shouldDeleteByStatus(vm orchard.VM, now time.Time) (bool, string) {
+	switch vm.Status {
+	case orchard.VMStatusStopped:
+		return true, "stopped"
+	case orchard.VMStatusFailed:
+		return true, "failed"
+	case orchard.VMStatusCreating:
+		// Orchard's v1 API exposes "pending" and the client maps it to
+		// VMStatusCreating — so this case covers pending VMs that never get
+		// scheduled onto a worker. Reap them aggressively so the queue drains.
+		if !vm.CreatedAt.IsZero() && now.Sub(vm.CreatedAt) > c.maxPendingAge {
+			return true, "stuck pending"
+		}
+	default:
+		if !vm.CreatedAt.IsZero() && now.Sub(vm.CreatedAt) > c.maxAge {
+			return true, "max age exceeded"
+		}
+	}
+	return false, ""
 }
 
 func (c *Cleanup) removeRunner(ctx context.Context, name string) {
