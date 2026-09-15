@@ -35,6 +35,10 @@ type Manager struct {
 	// counting as capacity. Shared with state so every path agrees.
 	staleAfter time.Duration
 
+	// cleanup is set once in Run before any scale set starts, so runScaleSet
+	// can hand it VMs whose delete failed.
+	cleanup *brdg.Cleanup
+
 	// newGHClient creates a scaleset client for the given config URL.
 	// Extracted for testing.
 	newGHClient func(configURL string) (*scaleset.Client, error)
@@ -163,6 +167,7 @@ func (m *Manager) Run(ctx context.Context) error {
 
 	// Start cleanup goroutine
 	cleanup := brdg.NewCleanup(m.orchardClient, m.capacity, runnerRemover, m.logger)
+	m.cleanup = cleanup
 	cleanup.SetStateView(m.state)
 	if maxAge := m.cfg.MaxVMAgeDuration(); maxAge > 0 {
 		cleanup.SetMaxAge(maxAge)
@@ -302,6 +307,10 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 	b.SetOnVMChange(func() {
 		m.recomputeScaleSetShares(ctx)
 	})
+
+	if m.cleanup != nil {
+		b.SetOnDeleteFailed(m.cleanup.MarkForDeletion)
+	}
 
 	m.bridgesMu.Lock()
 	m.handles = append(m.handles, handle)
