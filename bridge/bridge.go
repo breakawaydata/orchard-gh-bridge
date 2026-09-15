@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/actions/scaleset"
 
@@ -38,6 +39,13 @@ type Bridge struct {
 	// testCreateOneVM, when non-nil, replaces createOneVM in scale-up loops.
 	// Used only in unit tests to inject failures without a real GitHub client.
 	testCreateOneVM func(ctx context.Context, cpu, memory uint64, labels map[string]string, logExtras []any) error
+
+	// placementCursor rotates the starting point into the free-worker list on
+	// each AutoSize scale-up. Without it every scale-up takes candidates[0],
+	// and since GitHub usually offers one job at a time, the same worker is
+	// picked every time while the last worker in Orchard's list order never
+	// runs anything.
+	placementCursor atomic.Uint64
 
 	mu        sync.Mutex
 	activeVMs map[string]string // runnerName or vmName → vmName
@@ -232,10 +240,14 @@ func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActiv
 		"currentActive", currentActive,
 	)
 
+	// Start this batch where the last one left off so placements spread across
+	// the fleet rather than repeatedly landing on the same machine.
+	start := int(b.placementCursor.Add(uint64(acquired)) - uint64(acquired))
+
 	created := 0
 	skipped := 0
 	for i := 0; i < acquired; i++ {
-		w := candidates[i]
+		w := candidates[(start+i)%len(candidates)]
 		cpu, mem, err := AutoSizedVM(w, reserveCPU, reserveMem)
 		if err != nil {
 			b.logger.Warn("skipping worker for autoSize", "worker", w.Name, "error", err)
