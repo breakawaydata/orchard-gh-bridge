@@ -175,7 +175,7 @@ func TestHandleDesired_BlocksWhenNoFreeSlots(t *testing.T) {
 	}
 
 	cap := NewCapacity(10)
-	sv := NewStateView(mock, time.Minute)
+	sv := NewStateView(mock, time.Minute, DefaultWorkerStaleAfter)
 
 	// GHClient intentionally nil: if the gate fails to short-circuit,
 	// HandleDesiredRunnerCount will panic when it tries to generate a JIT
@@ -211,7 +211,7 @@ func TestHandleDesired_BlocksWhenOnlyMatchingWorkerPaused(t *testing.T) {
 	}
 
 	cap := NewCapacity(10)
-	sv := NewStateView(mock, time.Minute)
+	sv := NewStateView(mock, time.Minute, DefaultWorkerStaleAfter)
 
 	// GHClient nil: if the gate leaks, JIT generation panics — test signal.
 	b := New(Config{
@@ -247,7 +247,7 @@ func TestHandleDesired_RespectsLabelsForCapacity(t *testing.T) {
 	}
 
 	cap := NewCapacity(10)
-	sv := NewStateView(mock, time.Minute)
+	sv := NewStateView(mock, time.Minute, DefaultWorkerStaleAfter)
 	b := New(Config{
 		ScaleSetName:  "test",
 		VMConfig:      config.VMConfig{Labels: map[string]string{"arch": "arm"}},
@@ -277,7 +277,7 @@ func TestHydrateFromOrchard_AdoptsExisting(t *testing.T) {
 	mock.vms["gha-orchard-test-55555555"] = &orchard.VM{Name: "gha-orchard-test-55555555", Status: orchard.VMStatusStopped}
 
 	cap := NewCapacity(10)
-	sv := NewStateView(mock, time.Minute)
+	sv := NewStateView(mock, time.Minute, DefaultWorkerStaleAfter)
 	b := New(Config{
 		ScaleSetName:  "test",
 		OrchardClient: mock,

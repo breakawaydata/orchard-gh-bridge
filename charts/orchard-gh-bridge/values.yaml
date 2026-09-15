@@ -70,6 +70,11 @@ config:
   # above the longest consuming job's `timeout-minutes` so the GitHub job timeout
   # governs and this stays a runaway backstop.
   # maxVMAge: ""
+  # workerStaleAfter is how long an Orchard worker may go without a heartbeat
+  # before it stops counting as capacity (Go duration). Empty = 2m default.
+  # Workers ping every few seconds, so the default is many missed beats; setting
+  # this below the ping interval will flap capacity.
+  # workerStaleAfter: ""
   orchard:
     address: "http://orchard-controller:6120"
     username: "bootstrap-admin"
