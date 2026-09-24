@@ -5,5 +5,10 @@ metadata:
   labels:
     {{- include "orchard-gh-bridge.labels" . | nindent 4 }}
 data:
+  {{- /* The top-level metrics block drives both the app's /metrics server and
+  the Service, scrape annotations and ServiceMonitor, so the two cannot bind
+  different ports or disagree on whether metrics are on. */}}
+  {{- $cfg := deepCopy .Values.config }}
+  {{- $_ := set $cfg "metrics" (dict "enabled" .Values.metrics.enabled "port" .Values.metrics.port) }}
   config.yaml: |
-    {{- .Values.config | toYaml | nindent 4 }}
+    {{- $cfg | toYaml | nindent 4 }}

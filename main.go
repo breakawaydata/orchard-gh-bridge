@@ -12,6 +12,7 @@ import (
 	"github.com/breakawaydata/orchard-gh-bridge/config"
 	"github.com/breakawaydata/orchard-gh-bridge/health"
 	"github.com/breakawaydata/orchard-gh-bridge/manager"
+	"github.com/breakawaydata/orchard-gh-bridge/metrics"
 	"github.com/breakawaydata/orchard-gh-bridge/orchard"
 )
 
@@ -46,7 +47,14 @@ func main() {
 	healthSrv := health.NewServer(cfg.Health.Port, orchardClient, logger)
 	go healthSrv.Start()
 
-	mgr, err := manager.New(cfg, orchardClient, logger)
+	// The registry always exists so metric updates never need a guard; it is
+	// only served when metrics are enabled.
+	reg := metrics.NewRegistry()
+	if cfg.Metrics.Enabled {
+		go metrics.Serve(cfg.Metrics.Port, reg, logger.With("component", "metrics"))
+	}
+
+	mgr, err := manager.New(cfg, orchardClient, logger, reg)
 	if err != nil {
 		logger.Error("failed to create manager", "error", err)
 		os.Exit(1)

@@ -65,7 +65,8 @@ func TestLiveWorkers_PreservesOrderAndKeepsPaused(t *testing.T) {
 // TestWorkerCountForLabels_ExcludesOfflineWorker reproduces the September 2026
 // dev incident: a Mac was wiped and re-registered under a new name, leaving the
 // old registration behind. The old one was never paused and still satisfied the
-// AutoSize pin invariant (label == name), so it kept counting as a slot a month
+// AutoSize pin invariant of the time (label == name; relaxed to label uniqueness
+// among live workers by BAE-8010), so it kept counting as a slot a month
 // after the machine stopped heartbeating. The bridge acquired a real GitHub job
 // for that phantom slot on every scale-up, so the job could never start.
 func TestWorkerCountForLabels_ExcludesOfflineWorker(t *testing.T) {

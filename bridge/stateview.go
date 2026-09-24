@@ -46,6 +46,10 @@ type StateView struct {
 	mu         sync.Mutex
 	snap       *Snapshot
 	refreshing chan struct{} // non-nil while a refresh is in-flight
+	// lastErr is the outcome of the most recent refresh, so callers that
+	// joined an in-flight refresh learn it failed rather than mistaking the
+	// retained older snapshot for a fresh one.
+	lastErr error
 }
 
 // NewStateView builds a shared state cache. staleAfter is the heartbeat age
@@ -86,12 +90,15 @@ func (s *StateView) Get(ctx context.Context) (*Snapshot, error) {
 			return nil, ctx.Err()
 		}
 		s.mu.Lock()
-		snap := s.snap
+		snap, lastErr := s.snap, s.lastErr
 		s.mu.Unlock()
 		if snap == nil {
-			return nil, errors.New("orchard state refresh failed")
+			if lastErr == nil {
+				lastErr = errors.New("orchard state refresh failed")
+			}
+			return nil, lastErr
 		}
-		return snap, nil
+		return snap, lastErr
 	}
 
 	// We lead the refresh.
@@ -106,6 +113,7 @@ func (s *StateView) Get(ctx context.Context) (*Snapshot, error) {
 	if err == nil {
 		s.snap = snap
 	}
+	s.lastErr = err
 	s.refreshing = nil
 	close(done)
 	if err != nil {

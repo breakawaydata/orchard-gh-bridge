@@ -162,6 +162,44 @@ func TestListWorkers(t *testing.T) {
 	}
 }
 
+func TestDeleteWorker(t *testing.T) {
+	var gotMethod, gotPath string
+	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	if err := c.DeleteWorker(context.Background(), "BreakAwySFMini1.localdomain"); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Errorf("method = %q, want DELETE", gotMethod)
+	}
+	if gotPath != "/v1/workers/BreakAwySFMini1.localdomain" {
+		t.Errorf("path = %q, want /v1/workers/BreakAwySFMini1.localdomain", gotPath)
+	}
+}
+
+func TestDeleteWorker_AlreadyGone(t *testing.T) {
+	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+
+	if err := c.DeleteWorker(context.Background(), "gone-worker"); err != nil {
+		t.Errorf("expected no error for 404 delete, got %v", err)
+	}
+}
+
+func TestDeleteWorker_ServerError(t *testing.T) {
+	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+
+	if err := c.DeleteWorker(context.Background(), "w1"); err == nil {
+		t.Error("expected error for 500 delete")
+	}
+}
+
 func TestAPIError(t *testing.T) {
 	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

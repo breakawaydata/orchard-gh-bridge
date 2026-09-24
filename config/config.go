@@ -10,6 +10,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	// DefaultWorkerStaleAfter is the heartbeat age past which a worker stops
+	// counting as capacity when workerStaleAfter is unset. Defined here rather
+	// than in the bridge package so Validate can compare workerPruneAfter
+	// against the effective value without an import cycle; bridge re-exports it.
+	DefaultWorkerStaleAfter = 2 * time.Minute
+	// DefaultWorkerPruneAfter is the heartbeat age past which the cleanup loop
+	// deletes an offline worker's record when workerPruneAfter is unset.
+	DefaultWorkerPruneAfter = time.Hour
+	// DefaultMaxPendingAge is how long a managed VM may sit in "pending" before
+	// the cleanup loop reaps it, when maxPendingAge is unset.
+	DefaultMaxPendingAge = 10 * time.Minute
+)
+
 type Config struct {
 	LogLevel string `yaml:"logLevel"`
 	MaxVMs   int    `yaml:"maxVMs"`
@@ -24,12 +38,24 @@ type Config struct {
 	// string, e.g. "2m"). Empty keeps the built-in default
 	// (bridge.DefaultWorkerStaleAfter). Raise it only if your workers ping
 	// infrequently; lowering it below the worker ping interval will flap.
-	WorkerStaleAfter string           `yaml:"workerStaleAfter"`
-	Orchard          OrchardConfig    `yaml:"orchard"`
-	GitHub           GitHubConfig     `yaml:"github"`
-	ScaleSets        []ScaleSetConfig `yaml:"scaleSets"`
-	Health           HealthConfig     `yaml:"health"`
-	Metrics          MetricsConfig    `yaml:"metrics"`
+	WorkerStaleAfter string `yaml:"workerStaleAfter"`
+	// WorkerPruneAfter is how long an Orchard worker may go without a heartbeat
+	// before the cleanup loop deletes its record from the controller (a Go
+	// duration string, e.g. "1h"). Empty keeps DefaultWorkerPruneAfter; "0"
+	// disables pruning. Must be longer than workerStaleAfter. A worker that is
+	// still running re-registers on its next connection, so pruning discards
+	// only the record left behind when a machine is renamed or retired.
+	WorkerPruneAfter string `yaml:"workerPruneAfter"`
+	// MaxPendingAge is how long a managed VM may sit in "pending" before the
+	// cleanup loop reaps it as stuck (a Go duration string, e.g. "30m"). Empty
+	// keeps DefaultMaxPendingAge. Raise it when a worker's first pull of a large
+	// image legitimately takes longer than the default.
+	MaxPendingAge string           `yaml:"maxPendingAge"`
+	Orchard       OrchardConfig    `yaml:"orchard"`
+	GitHub        GitHubConfig     `yaml:"github"`
+	ScaleSets     []ScaleSetConfig `yaml:"scaleSets"`
+	Health        HealthConfig     `yaml:"health"`
+	Metrics       MetricsConfig    `yaml:"metrics"`
 }
 
 type OrchardConfig struct {
@@ -74,11 +100,13 @@ type VMConfig struct {
 // orchard-worker daemon, and a default Colima Docker VM on the host. If your
 // Colima profile is bigger, bump ReserveCPU / ReserveMemoryMiB.
 //
-// The bridge selects a free worker per VM and pins placement via a label
-// matching the worker's own Orchard Name. Each AutoSize-eligible worker
-// must therefore self-label with that name (see README's "Worker setup"
-// section for the convention). One managed VM per worker is enforced by
-// the bridge regardless of the worker's tart-vms slot count.
+// The bridge selects a free worker per VM and pins placement by copying the
+// worker's orchard-gh-bridge/worker-name label value onto the VM. Each
+// AutoSize-eligible worker must carry that label with a value no other live
+// worker shares; by convention it is the worker's Name, but it need not stay
+// equal to it (see README's "Worker setup for AutoSize"). One managed VM per
+// worker is enforced by the bridge regardless of the worker's tart-vms slot
+// count.
 type AutoSizeConfig struct {
 	Enabled          bool   `yaml:"enabled"`
 	ReserveCPU       uint64 `yaml:"reserveCPU"`
@@ -187,6 +215,31 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.MaxPendingAge != "" {
+		if d, err := time.ParseDuration(c.MaxPendingAge); err != nil {
+			errs = append(errs, fmt.Sprintf("maxPendingAge %q is not a valid duration: %v", c.MaxPendingAge, err))
+		} else if d <= 0 {
+			errs = append(errs, "maxPendingAge must be a positive duration")
+		}
+	}
+
+	if c.WorkerPruneAfter != "" {
+		if d, err := time.ParseDuration(c.WorkerPruneAfter); err != nil {
+			errs = append(errs, fmt.Sprintf("workerPruneAfter %q is not a valid duration: %v", c.WorkerPruneAfter, err))
+		} else if d < 0 {
+			errs = append(errs, "workerPruneAfter must not be negative (use \"0\" to disable pruning)")
+		}
+	}
+	// Pruning a worker the bridge still counts as live would delete the record
+	// of a machine that is merely slow to heartbeat, so an explicit prune
+	// threshold must sit strictly beyond the staleness one. An unset one never
+	// fails validation: WorkerPruneAfterDuration disables the default instead,
+	// so a config with a long workerStaleAfter that was valid before
+	// workerPruneAfter existed still starts.
+	if prune, stale := c.WorkerPruneAfterDuration(), c.effectiveWorkerStaleAfter(); c.WorkerPruneAfter != "" && prune > 0 && stale > 0 && prune <= stale {
+		errs = append(errs, fmt.Sprintf("workerPruneAfter (%s) must be greater than workerStaleAfter (%s)", prune, stale))
+	}
+
 	hasApp := c.GitHub.AppID != 0 && c.GitHub.InstallationID != 0 &&
 		(c.GitHub.PrivateKey != "" || c.GitHub.PrivateKeyPath != "")
 	hasPAT := c.GitHub.Token != ""
@@ -236,6 +289,57 @@ func (c *Config) WorkerStaleAfterDuration() time.Duration {
 		return 0
 	}
 	d, _ := time.ParseDuration(c.WorkerStaleAfter)
+	return d
+}
+
+// effectiveWorkerStaleAfter is WorkerStaleAfterDuration with the default
+// applied, or 0 when the configured value does not parse (Validate reports
+// that separately).
+func (c *Config) effectiveWorkerStaleAfter() time.Duration {
+	if c.WorkerStaleAfter == "" {
+		return DefaultWorkerStaleAfter
+	}
+	d, err := time.ParseDuration(c.WorkerStaleAfter)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// WorkerPruneAfterDuration returns the heartbeat age past which offline worker
+// records are deleted: DefaultWorkerPruneAfter when unset, 0 when explicitly
+// disabled ("0") or unparseable (Validate rejects the latter). When unset and
+// workerStaleAfter is at or beyond the default, pruning is off (see
+// WorkerPruneDefaultSuppressed): the default must never prune a worker the
+// bridge still counts as live.
+func (c *Config) WorkerPruneAfterDuration() time.Duration {
+	if c.WorkerPruneAfter == "" {
+		if c.WorkerPruneDefaultSuppressed() {
+			return 0
+		}
+		return DefaultWorkerPruneAfter
+	}
+	d, err := time.ParseDuration(c.WorkerPruneAfter)
+	if err != nil || d < 0 {
+		return 0
+	}
+	return d
+}
+
+// WorkerPruneDefaultSuppressed reports whether workerPruneAfter is unset and
+// the default is switched off because workerStaleAfter is not below it.
+func (c *Config) WorkerPruneDefaultSuppressed() bool {
+	return c.WorkerPruneAfter == "" && c.effectiveWorkerStaleAfter() >= DefaultWorkerPruneAfter
+}
+
+// MaxPendingAgeDuration returns the configured stuck-pending reaping age, or 0
+// when unset (callers keep their default). Validate guarantees a non-empty
+// value parses, so the parse error is intentionally ignored here.
+func (c *Config) MaxPendingAgeDuration() time.Duration {
+	if c.MaxPendingAge == "" {
+		return 0
+	}
+	d, _ := time.ParseDuration(c.MaxPendingAge)
 	return d
 }
 

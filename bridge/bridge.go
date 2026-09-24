@@ -204,7 +204,8 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 }
 
 // handleAutoSizeScaleUp creates one VM per free worker, sized from each
-// worker's advertised resources. Pinned to the chosen worker via PinLabelKey.
+// worker's advertised resources. Pinned to the chosen worker by setting
+// PinLabelKey to its pin identity.
 func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActive int) (int, error) {
 	if b.state == nil {
 		b.logger.Warn("autoSize requires a StateView; skipping scale-up")
@@ -255,8 +256,9 @@ func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActiv
 			skipped++
 			continue
 		}
-		labels := mergePinLabel(b.vmConfig.Labels, w.Name)
-		extra := []any{"worker", w.Name, "cpu", cpu, "memoryMiB", mem}
+		pin := PinIdentity(w)
+		labels := mergePinLabel(b.vmConfig.Labels, pin)
+		extra := []any{"worker", w.Name, "pinLabel", pin, "cpu", cpu, "memoryMiB", mem}
 		if err := b.doCreateOneVM(ctx, cpu, mem, labels, extra); err != nil {
 			b.capacity.Release(acquired - skipped - created)
 			b.notifyChange()
@@ -323,15 +325,16 @@ func (b *Bridge) doCreateOneVM(ctx context.Context, cpu, memory uint64, labels m
 	return b.createOneVM(ctx, cpu, memory, labels, logExtras)
 }
 
-// mergePinLabel returns a copy of base with PinLabelKey set to workerName.
+// mergePinLabel returns a copy of base with PinLabelKey set to pin, the target
+// worker's pin identity (see PinIdentity).
 // Avoids mutating the caller's map (b.vmConfig.Labels is shared with the
 // scale set config and is read by other goroutines).
-func mergePinLabel(base map[string]string, workerName string) map[string]string {
+func mergePinLabel(base map[string]string, pin string) map[string]string {
 	out := make(map[string]string, len(base)+1)
 	for k, v := range base {
 		out[k] = v
 	}
-	out[PinLabelKey] = workerName
+	out[PinLabelKey] = pin
 	return out
 }
 

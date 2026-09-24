@@ -26,83 +26,212 @@ func mkWorker(name string, cores, memMiB, tartVMs uint64, extraLabels map[string
 	}
 }
 
-func TestAutoSizeEligible(t *testing.T) {
+// mkRenamedWorker is a worker whose Orchard Name no longer matches its pin
+// label: the SF Mini 1 incident, where a macOS upgrade changed the hostname
+// (and so the default worker Name) but the launchd plist kept the old label.
+func mkRenamedWorker(name, pin string, cores, memMiB uint64, lastSeen time.Time, extraLabels map[string]string) orchard.Worker {
+	w := mkWorker(name, cores, memMiB, 1, extraLabels)
+	w.Labels[PinLabelKey] = pin
+	w.LastSeen = lastSeen
+	return w
+}
+
+func TestAutoSizeExclusionReason(t *testing.T) {
+	res := map[string]uint64{resourceLogicalCores: 10, resourceMemoryMiB: 16384}
 	tests := []struct {
 		name   string
 		worker orchard.Worker
-		want   bool
+		counts map[string]int
+		want   string
 	}{
-		{"complete", mkWorker("w1", 10, 16384, 1, nil), true},
+		{"complete", mkWorker("w1", 10, 16384, 1, nil), map[string]int{"w1": 1}, ""},
+		{"label differs from name is still eligible",
+			orchard.Worker{Name: "BreakAway-SF-Mac-Mini-1.local", Labels: map[string]string{PinLabelKey: "BreakAwySFMini1.localdomain"}, Resources: res},
+			map[string]int{"BreakAwySFMini1.localdomain": 1}, ""},
 		{"paused",
-			orchard.Worker{Name: "w1", SchedulingPaused: true, Labels: map[string]string{PinLabelKey: "w1"}, Resources: map[string]uint64{resourceLogicalCores: 10, resourceMemoryMiB: 16384}},
-			false},
+			orchard.Worker{Name: "w1", SchedulingPaused: true, Labels: map[string]string{PinLabelKey: "w1"}, Resources: res},
+			map[string]int{"w1": 1}, ExclusionSchedulingPaused},
 		{"missing pin label",
-			orchard.Worker{Name: "w1", Resources: map[string]uint64{resourceLogicalCores: 10, resourceMemoryMiB: 16384}},
-			false},
-		{"wrong pin value",
-			orchard.Worker{Name: "w1", Labels: map[string]string{PinLabelKey: "different"}, Resources: map[string]uint64{resourceLogicalCores: 10, resourceMemoryMiB: 16384}},
-			false},
+			orchard.Worker{Name: "w1", Resources: res},
+			nil, ExclusionMissingPinLabel},
+		{"empty pin label",
+			orchard.Worker{Name: "w1", Labels: map[string]string{PinLabelKey: ""}, Resources: res},
+			nil, ExclusionMissingPinLabel},
+		{"duplicate pin label",
+			orchard.Worker{Name: "w1", Labels: map[string]string{PinLabelKey: "shared"}, Resources: res},
+			map[string]int{"shared": 2}, ExclusionDuplicatePinLabel},
 		{"no cores resource",
 			orchard.Worker{Name: "w1", Labels: map[string]string{PinLabelKey: "w1"}, Resources: map[string]uint64{resourceMemoryMiB: 16384}},
-			false},
+			map[string]int{"w1": 1}, ExclusionMissingResources},
 		{"no memory resource",
 			orchard.Worker{Name: "w1", Labels: map[string]string{PinLabelKey: "w1"}, Resources: map[string]uint64{resourceLogicalCores: 10}},
-			false},
+			map[string]int{"w1": 1}, ExclusionMissingResources},
+		{"cores exactly equal to reserve",
+			mkWorker("w1", 4, 16384, 1, nil), map[string]int{"w1": 1}, ExclusionBelowReserves},
+		{"memory exactly equal to reserve",
+			mkWorker("w1", 10, 4096, 1, nil), map[string]int{"w1": 1}, ExclusionBelowReserves},
+		{"memory below reserve",
+			mkWorker("w1", 10, 2048, 1, nil), map[string]int{"w1": 1}, ExclusionBelowReserves},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := AutoSizeEligible(tc.worker); got != tc.want {
-				t.Errorf("AutoSizeEligible = %v, want %v", got, tc.want)
+			if got := AutoSizeExclusionReason(tc.worker, tc.counts, 4, 4096); got != tc.want {
+				t.Errorf("AutoSizeExclusionReason = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestAutoSizeEligibleWithReserves(t *testing.T) {
-	tests := []struct {
-		name       string
-		worker     orchard.Worker
-		reserveCPU uint64
-		reserveMem uint64
-		want       bool
-	}{
-		{
-			name:       "sufficient resources",
-			worker:     mkWorker("w1", 10, 16384, 1, nil),
-			reserveCPU: 4, reserveMem: 4096,
-			want: true,
-		},
-		{
-			name:       "cores exactly equal to reserve (not eligible)",
-			worker:     mkWorker("w1", 4, 16384, 1, nil),
-			reserveCPU: 4, reserveMem: 4096,
-			want: false,
-		},
-		{
-			name:       "memory exactly equal to reserve (not eligible)",
-			worker:     mkWorker("w1", 10, 4096, 1, nil),
-			reserveCPU: 4, reserveMem: 4096,
-			want: false,
-		},
-		{
-			name:       "cores less than reserve (not eligible)",
-			worker:     mkWorker("w1", 2, 16384, 1, nil),
-			reserveCPU: 4, reserveMem: 4096,
-			want: false,
-		},
-		{
-			name:       "ineligible base (no pin label)",
-			worker:     orchard.Worker{Name: "w1", Resources: map[string]uint64{resourceLogicalCores: 10, resourceMemoryMiB: 16384}},
-			reserveCPU: 4, reserveMem: 4096,
-			want: false,
-		},
+// TestWorkerCountForLabels_RenamedWorkerIsCounted reproduces BAE-8010: a live
+// worker whose Name changed but whose pin label did not must still count as
+// AutoSize capacity.
+func TestWorkerCountForLabels_RenamedWorkerIsCounted(t *testing.T) {
+	now := time.Now()
+	workers := []orchard.Worker{
+		mkRenamedWorker("BreakAway-SF-Mac-Mini-1.local", "BreakAwySFMini1.localdomain", 10, 32768, now, nil),
+		mkWorker("BreakAwySFMini2.localdomain", 10, 32768, 1, nil),
+		mkWorker("BA-Zoom-Mac-Mini.local", 10, 32768, 1, nil),
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := AutoSizeEligibleWithReserves(tc.worker, tc.reserveCPU, tc.reserveMem); got != tc.want {
-				t.Errorf("AutoSizeEligibleWithReserves = %v, want %v", got, tc.want)
-			}
-		})
+	if got := WorkerCountForLabels(workers, nil, 4, 4096); got != 3 {
+		t.Errorf("WorkerCountForLabels = %d, want 3 (renamed worker must still count)", got)
+	}
+}
+
+// TestWorkerCountForLabels_DuplicateLiveLabelsExcludeAllHolders: when two live
+// workers claim the same pin identity, a VM pinned to it could land on either,
+// so neither is usable.
+func TestWorkerCountForLabels_DuplicateLiveLabelsExcludeAllHolders(t *testing.T) {
+	now := time.Now()
+	workers := []orchard.Worker{
+		mkRenamedWorker("mini-a", "shared", 10, 32768, now, nil),
+		mkRenamedWorker("mini-b", "shared", 10, 32768, now, nil),
+		mkWorker("c", 10, 32768, 1, nil),
+	}
+	if got := WorkerCountForLabels(workers, nil, 4, 4096); got != 1 {
+		t.Errorf("WorkerCountForLabels = %d, want 1 (both holders of the shared label excluded)", got)
+	}
+}
+
+// TestWorkerCountForLabels_StaleDuplicateDoesNotBlockLiveWorker is the exact
+// incident shape: the old registration still sits in Orchard with the same pin
+// label, but it has stopped heartbeating, so once the snapshot filters it out
+// the live worker's label is unique.
+func TestWorkerCountForLabels_StaleDuplicateDoesNotBlockLiveWorker(t *testing.T) {
+	now := time.Now()
+	all := []orchard.Worker{
+		mkRenamedWorker("BreakAwySFMini1.localdomain", "BreakAwySFMini1.localdomain", 10, 32768, now.Add(-3*time.Hour), nil),
+		mkRenamedWorker("BreakAway-SF-Mac-Mini-1.local", "BreakAwySFMini1.localdomain", 10, 32768, now.Add(-5*time.Second), nil),
+	}
+	live := LiveWorkers(all, DefaultWorkerStaleAfter, now)
+	if got := WorkerCountForLabels(live, nil, 4, 4096); got != 1 {
+		t.Fatalf("WorkerCountForLabels(live) = %d, want 1", got)
+	}
+	free := freeAutoSizeWorkers(live, nil, nil, 4, 4096)
+	if len(free) != 1 || free[0].Name != "BreakAway-SF-Mac-Mini-1.local" {
+		t.Errorf("freeAutoSizeWorkers = %+v, want the live renamed worker", free)
+	}
+}
+
+func TestFreeAutoSizeWorkers_ScheduledVMMapsBackToPinIdentity(t *testing.T) {
+	now := time.Now()
+	workers := []orchard.Worker{
+		mkRenamedWorker("BreakAway-SF-Mac-Mini-1.local", "BreakAwySFMini1.localdomain", 10, 32768, now, nil),
+		mkWorker("b", 10, 32768, 1, nil),
+	}
+	// Orchard reports the Name of the worker the VM landed on, not the label.
+	vms := []orchard.VM{{
+		Name:   "gha-orchard-x-aaaaaaaa",
+		Worker: "BreakAway-SF-Mac-Mini-1.local",
+		Status: orchard.VMStatusRunning,
+		Labels: map[string]string{PinLabelKey: "BreakAwySFMini1.localdomain"},
+	}}
+	free := freeAutoSizeWorkers(workers, vms, nil, 4, 4096)
+	if len(free) != 1 || free[0].Name != "b" {
+		t.Errorf("freeAutoSizeWorkers = %+v, want only [b]", free)
+	}
+}
+
+func TestFreeAutoSizeWorkers_PendingVMMatchedByPinLabel(t *testing.T) {
+	now := time.Now()
+	workers := []orchard.Worker{
+		mkRenamedWorker("BreakAway-SF-Mac-Mini-1.local", "BreakAwySFMini1.localdomain", 10, 32768, now, nil),
+		mkWorker("b", 10, 32768, 1, nil),
+	}
+	// Pending: no worker yet. Its pin label is the worker's label, not its
+	// Name, and must still reserve that worker.
+	vms := []orchard.VM{{
+		Name:   "gha-orchard-x-bbbbbbbb",
+		Status: orchard.VMStatusCreating,
+		Labels: map[string]string{PinLabelKey: "BreakAwySFMini1.localdomain"},
+	}}
+	free := freeAutoSizeWorkers(workers, vms, nil, 4, 4096)
+	if len(free) != 1 || free[0].Name != "b" {
+		t.Errorf("freeAutoSizeWorkers = %+v, want only [b]", free)
+	}
+}
+
+// TestFreeAutoSizeWorkers_VMOnRenamedWorkersOldNameStillBlocks: a worker was
+// renamed while a VM was running on it. Orchard still attributes the VM to the
+// old, now-offline Name, but the machine (live under its new Name, same label)
+// may still be running it, so its pin identity must not be handed out again.
+func TestFreeAutoSizeWorkers_VMOnRenamedWorkersOldNameStillBlocks(t *testing.T) {
+	now := time.Now()
+	// Only the live renamed worker is in the (live) list; the VM sits on the
+	// stale record's Name, which is no longer there.
+	workers := []orchard.Worker{
+		mkRenamedWorker("BreakAway-SF-Mac-Mini-1.local", "BreakAwySFMini1.localdomain", 10, 32768, now, nil),
+	}
+	vms := []orchard.VM{{
+		Name:   "gha-orchard-x-cccccccc",
+		Worker: "BreakAwySFMini1.localdomain",
+		Status: orchard.VMStatusRunning,
+		Labels: map[string]string{PinLabelKey: "BreakAwySFMini1.localdomain"},
+	}}
+	if free := freeAutoSizeWorkers(workers, vms, nil, 4, 4096); len(free) != 0 {
+		t.Errorf("freeAutoSizeWorkers = %+v, want none (VM under the old Name still holds the pin identity)", free)
+	}
+
+	// Once that VM is gone the renamed worker is free again.
+	vms[0].Status = orchard.VMStatusStopped
+	if free := freeAutoSizeWorkers(workers, vms, nil, 4, 4096); len(free) != 1 {
+		t.Errorf("freeAutoSizeWorkers = %+v, want the renamed worker once the VM stopped", free)
+	}
+}
+
+// TestHandleDesired_AutoSize_PinsByLabelNotName: the VM the bridge creates for
+// a renamed worker must carry the worker's label value, because that is what
+// Orchard matches when it schedules; the Name would match nothing.
+func TestHandleDesired_AutoSize_PinsByLabelNotName(t *testing.T) {
+	mock := newMockOrchard()
+	mock.workers = []orchard.Worker{
+		mkRenamedWorker("BreakAway-SF-Mac-Mini-1.local", "BreakAwySFMini1.localdomain", 10, 32768, time.Now(), nil),
+	}
+	b := New(Config{
+		ScaleSetName:  "test",
+		VMConfig:      config.VMConfig{AutoSize: config.AutoSizeConfig{Enabled: true}},
+		OrchardClient: mock,
+		Capacity:      NewCapacity(10),
+		State:         NewStateView(mock, time.Minute, DefaultWorkerStaleAfter),
+		Logger:        testLogger(),
+	})
+	var gotLabels map[string]string
+	var gotCPU uint64
+	b.testCreateOneVM = func(_ context.Context, cpu, _ uint64, labels map[string]string, _ []any) error {
+		gotCPU, gotLabels = cpu, labels
+		return nil
+	}
+
+	if _, err := b.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatalf("HandleDesiredRunnerCount: %v", err)
+	}
+	if gotLabels == nil {
+		t.Fatal("no VM created for the renamed worker")
+	}
+	if got := gotLabels[PinLabelKey]; got != "BreakAwySFMini1.localdomain" {
+		t.Errorf("VM pin label = %q, want the worker's label value", got)
+	}
+	if gotCPU != 6 {
+		t.Errorf("VM cpu = %d, want 6 (sized from the renamed worker)", gotCPU)
 	}
 }
 
@@ -366,7 +495,7 @@ func TestHandleDesired_AutoSize_BlocksWhenWorkersTooSmallForReserves(t *testing.
 // the createOneVM-failure accounting with skipped=0 to confirm the fix.
 func TestHandleDesired_AutoSize_CapacityReleasedCorrectlyOnCreateFailure(t *testing.T) {
 	mock := newMockOrchard()
-	// Two large workers: both pass AutoSizeEligibleWithReserves → both candidates.
+	// Two large workers: both pass AutoSizeExclusionReason → both candidates.
 	mock.workers = []orchard.Worker{
 		mkWorker("w1", 10, 32768, 1, nil),
 		mkWorker("w2", 10, 32768, 1, nil),

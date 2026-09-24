@@ -15,8 +15,11 @@ type mockOrchardClient struct {
 	vms     map[string]*orchard.VM
 	workers []orchard.Worker
 
-	createErr error
-	deleteErr error
+	createErr       error
+	deleteErr       error
+	deleteWorkerErr error
+	listWorkersErr  error
+	deletedWorkers  []string
 }
 
 func newMockOrchard() *mockOrchardClient {
@@ -68,12 +71,38 @@ func (m *mockOrchardClient) DeleteVM(_ context.Context, name string) error {
 func (m *mockOrchardClient) ListWorkers(_ context.Context) ([]orchard.Worker, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.listWorkersErr != nil {
+		return nil, m.listWorkersErr
+	}
 	if m.workers != nil {
 		out := make([]orchard.Worker, len(m.workers))
 		copy(out, m.workers)
 		return out, nil
 	}
 	return []orchard.Worker{{Name: "worker-1"}}, nil
+}
+
+func (m *mockOrchardClient) DeleteWorker(_ context.Context, name string) error {
+	if m.deleteWorkerErr != nil {
+		return m.deleteWorkerErr
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deletedWorkers = append(m.deletedWorkers, name)
+	kept := m.workers[:0:0]
+	for _, w := range m.workers {
+		if w.Name != name {
+			kept = append(kept, w)
+		}
+	}
+	m.workers = kept
+	return nil
+}
+
+func (m *mockOrchardClient) deletedWorkerNames() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.deletedWorkers...)
 }
 
 func (m *mockOrchardClient) Ping(_ context.Context) error {

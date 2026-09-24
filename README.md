@@ -67,6 +67,9 @@ Kubernetes cluster
 7. When the job completes, the bridge **deletes the VM** from Orchard and **deregisters the runner** from GitHub.
 8. A background **cleanup goroutine** runs every 60 seconds to:
    - Reap VMs that are stopped, failed, or exceed a safety timeout (default 2h, override with `maxVMAge`)
+   - Reap VMs stuck in `pending` (default 10m, override with `maxPendingAge`)
+   - Delete the Orchard records of workers that have been offline longer than `workerPruneAfter` (default 1h) and have no VMs assigned
+   - Warn about workers an AutoSize scale set cannot use, and why
    - Deregister stale GitHub runner registrations for cleaned-up VMs
    - Refresh the maximum capacity from connected workers' `org.cirruslabs.tart-vms` resources
    - Reconcile the in-use capacity count with actual VM count in Orchard
@@ -188,7 +191,7 @@ When AutoSize is on:
 - Per-scale-set capacity is reported to GitHub as the count of label-matching workers, not the sum of their slots.
 - The defaults (4 cores / 4096 MiB reserve) leave room for macOS, the orchard-worker daemon, and a default Colima Docker VM on the host. Bump them if your Colima profile is bigger.
 
-**Worker setup for AutoSize:** each eligible worker must self-label with its own Orchard Name so the bridge can pin a VM there. The label key is `orchard-gh-bridge/worker-name`:
+**Worker setup for AutoSize:** each eligible worker self-labels with a pin identity so the bridge can pin a VM there. The label key is `orchard-gh-bridge/worker-name`, and by convention its value is the worker's `--name`:
 
 ```bash
 orchard worker run \
@@ -197,18 +200,22 @@ orchard worker run \
   --resources "org.cirruslabs.tart-vms:1,org.cirruslabs.logical-cores:10,org.cirruslabs.memory-mib:16384"
 ```
 
-The bridge logs `created autoSize VM ... worker=<name> cpu=<n> memoryMiB=<n>` for each provisioning, so the chosen size is visible in real time.
+The bridge logs `created VM ... worker=<name> pinLabel=<label> cpu=<n> memoryMiB=<n>` for each provisioning, so the chosen size is visible in real time.
 
-> **Keep `orchard-gh-bridge/worker-name` equal to `--name`, and re-check it after a
-> rename or a reinstall.** A machine that comes back under a new hostname registers
-> as a *new* worker and leaves the old registration behind. The stale one still
-> satisfies `label == name`, so it stays AutoSize-eligible and keeps counting as a
-> slot, while the live one (now `label != name`) is invisible to AutoSize even
-> though Orchard will still place label-pinned VMs on it. The bridge acquires a
-> real GitHub job for every VM it creates, so a phantom slot does not idle — it
-> repeatedly acquires jobs and hands them back. `workerStaleAfter` bounds the
-> damage, but the registration should be cleaned up with
-> `orchard delete worker <old-name>`.
+**The label value is the pin identity, not the Orchard Name.** The bridge sets the same value on each VM it creates, and Orchard schedules that VM onto the worker whose label matches, so the two do not have to agree. That matters because a worker's Name defaults to its hostname and can change underneath you (a macOS upgrade is enough), while the label lives in the host's launchd plist and does not. A renamed worker keeps its place in the AutoSize pools.
+
+A live worker is AutoSize-eligible when it:
+
+- is not scheduling-paused,
+- has a non-empty `orchard-gh-bridge/worker-name` label,
+- holds that label value alone among live workers — if two live workers share it, a pinned VM could land on either, so **both** are excluded until one goes away,
+- advertises `logical-cores` and `memory-mib`, with more of each than the scale set's reserves.
+
+Workers that have stopped heartbeating (see `workerStaleAfter`) are not live, so the stale record a rename leaves behind does not make its successor's label look shared.
+
+**Exclusions are never silent.** When a label-matching live worker is left out of an AutoSize scale set, the bridge logs a WARN naming the scale set, worker, pin label and reason (`scheduling_paused`, `missing_pin_label`, `duplicate_pin_label`, `missing_resources`, `below_reserves`). It logs once when the state changes, not every reconcile, and an INFO when the worker becomes eligible again. The same state is exported as metrics (see [Monitoring](#monitoring)).
+
+**Offline worker records are pruned.** A renamed or re-imaged Mac registers as a new worker and leaves its old record behind. The cleanup loop deletes a worker record once it has been offline longer than `workerPruneAfter` (default `1h`; `"0"` disables it). It never deletes a worker that is still live, one with any VM assigned to it, or one that is scheduling-paused, since an operator paused it deliberately (it logs that at INFO instead). A worker that is still running registers itself again the next time it connects, so a prune loses nothing.
 
 ### Stateless design
 
@@ -378,9 +385,11 @@ See [charts/orchard-gh-bridge/values.yaml](charts/orchard-gh-bridge/values.yaml)
 | `config.maxVMs` | Global VM capacity cap (0 = auto-detect from workers) |
 | `config.maxVMAge` | VM reaping safety timeout as a Go duration, e.g. `4h` (empty = 2h default). Set above the longest consuming job's `timeout-minutes` so the job timeout governs and this stays a backstop. |
 | `config.workerStaleAfter` | How long an Orchard worker may go without a heartbeat before it stops counting as capacity (Go duration, e.g. `2m`; empty = 2m default). Raise only if your workers ping infrequently — below the ping interval it will flap. |
+| `config.workerPruneAfter` | How long an Orchard worker may go without a heartbeat before the cleanup loop deletes its record (Go duration; empty = `1h` default; `"0"` disables). An explicit value must be greater than `workerStaleAfter`; if it is unset and `workerStaleAfter` is 1h or more, pruning stays off (logged as a WARN at startup). Workers with VMs assigned, or with scheduling paused, are never pruned. |
+| `config.maxPendingAge` | How long a managed VM may sit in `pending` before it is reaped as stuck (Go duration; empty = `10m` default). Raise it if a worker's first pull of a large Tart image takes longer. |
 | `existingSecret` | Name of a pre-created K8s Secret |
 | `externalSecret` | External Secrets Operator config |
-| `metrics` | Prometheus ServiceMonitor config |
+| `metrics` | `enabled`, `port` (default 9090): serve Prometheus metrics at `/metrics` and expose the port; `serviceMonitor` config |
 | `resources` | CPU/memory requests and limits |
 
 ## Local development
@@ -448,6 +457,16 @@ The bridge exposes health endpoints:
 
 - `GET /healthz` -- liveness probe (always returns 200)
 - `GET /readyz` -- readiness probe (checks Orchard controller connectivity)
+
+With metrics enabled it also serves Prometheus metrics at `GET /metrics` on the metrics port (default 9090). In the Helm chart, the top-level `metrics.enabled` / `metrics.port` drive both the bridge's server (they are rendered into `config.metrics`) and the Service, scrape annotations and optional ServiceMonitor, so the two cannot disagree. Outside the chart, set `metrics.enabled` / `metrics.port` in the config file.
+
+| Metric | Type | Labels | Meaning |
+|--------|------|--------|---------|
+| `orchard_gh_bridge_autosize_worker_excluded` | gauge | `scale_set`, `worker`, `pin_label`, `reason` | 1 for each live, label-matching worker an AutoSize scale set cannot use. The series disappears when the worker recovers or goes offline. |
+| `orchard_gh_bridge_autosize_eligible_workers` | gauge | `scale_set` | Live workers each AutoSize scale set can place VMs on. |
+| `orchard_gh_bridge_workers_pruned_total` | counter | | Offline worker records deleted by the cleanup loop. |
+
+A useful alert is any `orchard_gh_bridge_autosize_worker_excluded` series that persists for more than a few minutes, or `orchard_gh_bridge_autosize_eligible_workers` dropping below the expected fleet size.
 
 Monitor VMs from the command line:
 

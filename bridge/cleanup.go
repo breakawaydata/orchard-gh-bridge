@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/breakawaydata/orchard-gh-bridge/config"
+	"github.com/breakawaydata/orchard-gh-bridge/metrics"
 	"github.com/breakawaydata/orchard-gh-bridge/orchard"
 )
 
@@ -14,10 +16,12 @@ const (
 	DefaultMaxVMAge        = 2 * time.Hour
 	// DefaultMaxPendingAge is how long a managed VM may sit in "creating"
 	// (Orchard's wire-level "pending") before cleanup reaps it. Comfortably
-	// above image pull + runner download + register (~1–3 min typical). Stuck
-	// pending VMs otherwise occupy a capacity slot until DefaultMaxVMAge,
-	// starving the queue.
-	DefaultMaxPendingAge = 10 * time.Minute
+	// above image pull + runner download + register (~1–3 min typical) on a
+	// worker that already has the image cached. Stuck pending VMs otherwise
+	// occupy a capacity slot until DefaultMaxVMAge, starving the queue. A
+	// worker's first pull of a large (~50 GB) Tart image can take longer; raise
+	// it with config maxPendingAge.
+	DefaultMaxPendingAge = config.DefaultMaxPendingAge
 )
 
 // RunnerRemover deregisters GitHub Actions runner registrations.
@@ -36,6 +40,18 @@ type Cleanup struct {
 	interval      time.Duration
 	maxAge        time.Duration
 	maxPendingAge time.Duration
+
+	// pruneAfter is the heartbeat age past which an offline worker's record is
+	// deleted from Orchard. Zero disables pruning.
+	pruneAfter time.Duration
+	// pruneSkipLogged remembers workers whose prune was skipped and why, so a
+	// worker that stays skipped is logged once, not every sweep.
+	pruneSkipLogged map[string]string
+	prunedTotal     *metrics.CounterVec
+
+	// onSweep is invoked with the live worker list after every successful
+	// sweep. The manager uses it to report AutoSize exclusions.
+	onSweep func(workers []orchard.Worker)
 
 	// pendingMu guards pendingDeletes, which holds VMs whose delete already
 	// failed once (typically because the controller was briefly unreachable).
@@ -56,6 +72,9 @@ func NewCleanup(orchardClient orchard.Client, capacity *Capacity, runnerRemover 
 		maxAge:         DefaultMaxVMAge,
 		maxPendingAge:  DefaultMaxPendingAge,
 		pendingDeletes: make(map[string]struct{}),
+		// Pruning is opt-in at this level; the manager enables it from config,
+		// whose default (config.DefaultWorkerPruneAfter) is on.
+		pruneSkipLogged: make(map[string]string),
 	}
 }
 
@@ -115,6 +134,40 @@ func (c *Cleanup) SetMaxAge(maxAge time.Duration) {
 	}
 }
 
+// SetMaxPendingAge overrides how long a managed VM may stay pending before it
+// is reaped as stuck. Non-positive values are ignored, preserving
+// DefaultMaxPendingAge.
+func (c *Cleanup) SetMaxPendingAge(d time.Duration) {
+	if d > 0 {
+		c.maxPendingAge = d
+	}
+}
+
+// SetWorkerPruneAfter enables deleting worker records that have not
+// heartbeated for d. Zero or negative disables pruning. Callers must keep d
+// above the worker staleness threshold (config.Validate enforces this), so a
+// worker the bridge still counts as live is never pruned.
+func (c *Cleanup) SetWorkerPruneAfter(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	c.pruneAfter = d
+}
+
+// SetMetrics registers the cleanup loop's metrics on reg.
+func (c *Cleanup) SetMetrics(reg *metrics.Registry) {
+	c.prunedTotal = reg.NewCounterVec(
+		"orchard_gh_bridge_workers_pruned_total",
+		"Offline Orchard worker records deleted by the cleanup loop.",
+	)
+}
+
+// SetOnSweep registers a callback invoked with the live workers after each
+// successful sweep.
+func (c *Cleanup) SetOnSweep(fn func(workers []orchard.Worker)) {
+	c.onSweep = fn
+}
+
 // SetOnVMCleaned registers a callback invoked after a VM is reaped.
 // Used by the manager to notify bridges so they can purge stale activeVM entries.
 func (c *Cleanup) SetOnVMCleaned(fn func(vmName string)) {
@@ -137,11 +190,12 @@ func (c *Cleanup) Run(ctx context.Context) {
 }
 
 func (c *Cleanup) sweep(ctx context.Context) {
-	vms, workers, err := c.listVMsAndWorkers(ctx)
+	st, err := c.listVMsAndWorkers(ctx)
 	if err != nil {
 		c.logger.Error("failed to list VMs for cleanup", "error", err)
 		return
 	}
+	vms, workers := st.vms, st.live
 
 	now := time.Now()
 	managedCount := 0
@@ -210,25 +264,135 @@ func (c *Cleanup) sweep(ctx context.Context) {
 	if deleted > 0 {
 		c.logger.Info("cleanup sweep complete", "deleted", deleted, "remaining", managedCount)
 	}
+
+	// Only prune from a fresh read. A snapshot the StateView kept after a
+	// failed refresh can be arbitrarily old, and judged against the clock it
+	// would make every worker look offline.
+	if st.fresh && c.pruneOfflineWorkers(ctx, vms, st.all, liveWorkers, st.fetchedAt) > 0 && c.state != nil {
+		c.state.Invalidate()
+	}
+
+	if c.onSweep != nil {
+		c.onSweep(workers)
+	}
 }
 
-func (c *Cleanup) listVMsAndWorkers(ctx context.Context) ([]orchard.VM, []orchard.Worker, error) {
+// pruneOfflineWorkers deletes the Orchard records of workers that have not
+// heartbeated for pruneAfter as of now, the time the worker list was read.
+// Returns how many were deleted.
+//
+// A renamed or re-imaged Mac registers as a new worker and leaves its old
+// record behind, still carrying the same labels. Left alone, those records
+// accumulate and confuse anyone reading `orchard list workers`; in the
+// BAE-8010 incident the stale record also shared the live worker's pin label.
+// A worker that is merely down re-registers itself on its next connection, so
+// deleting the record loses nothing.
+//
+// Never deleted: a worker the bridge still counts as live, a worker with a
+// zero LastSeen (the controller did not report it; fail safe, as WorkerLive
+// does), a worker that still has any VM assigned to it, and a worker an
+// operator has paused on purpose.
+func (c *Cleanup) pruneOfflineWorkers(ctx context.Context, vms []orchard.VM, all []orchard.Worker, live map[string]struct{}, now time.Time) int {
+	if c.pruneAfter <= 0 {
+		return 0
+	}
+	hasVMs := make(map[string]int, len(vms))
+	for _, vm := range vms {
+		if vm.Worker != "" {
+			hasVMs[vm.Worker]++
+		}
+	}
+
+	pruned := 0
+	stillSkipped := make(map[string]struct{})
+	for _, w := range all {
+		if _, ok := live[w.Name]; ok {
+			continue
+		}
+		if w.LastSeen.IsZero() || now.Sub(w.LastSeen) <= c.pruneAfter {
+			continue
+		}
+		offlineFor := now.Sub(w.LastSeen).Round(time.Second)
+
+		skip := ""
+		switch {
+		case w.SchedulingPaused:
+			skip = "scheduling paused by an operator"
+		case hasVMs[w.Name] > 0:
+			skip = "worker still has VMs assigned"
+		}
+		if skip != "" {
+			stillSkipped[w.Name] = struct{}{}
+			if c.pruneSkipLogged[w.Name] != skip {
+				c.pruneSkipLogged[w.Name] = skip
+				c.logger.Info("not pruning offline worker",
+					"worker", w.Name,
+					"pinLabel", PinIdentity(w),
+					"offlineFor", offlineFor.String(),
+					"vms", hasVMs[w.Name],
+					"reason", skip)
+			}
+			continue
+		}
+
+		if err := c.orchardClient.DeleteWorker(ctx, w.Name); err != nil {
+			c.logger.Error("failed to prune offline worker", "worker", w.Name, "error", err)
+			continue
+		}
+		pruned++
+		c.prunedTotal.Inc()
+		c.logger.Info("pruned offline worker",
+			"worker", w.Name,
+			"pinLabel", PinIdentity(w),
+			"lastSeen", w.LastSeen,
+			"offlineFor", offlineFor.String(),
+			"pruneAfter", c.pruneAfter.String())
+	}
+	for name := range c.pruneSkipLogged {
+		if _, ok := stillSkipped[name]; !ok {
+			delete(c.pruneSkipLogged, name)
+		}
+	}
+	return pruned
+}
+
+// sweepState is what one sweep reads from Orchard.
+type sweepState struct {
+	vms []orchard.VM
+	// live holds workers still heartbeating; all holds every record,
+	// including offline ones.
+	live, all []orchard.Worker
+	// fetchedAt is when the lists were read. fresh is false when the
+	// StateView could not refresh and handed back its last snapshot instead.
+	fetchedAt time.Time
+	fresh     bool
+}
+
+// listVMsAndWorkers reads the state for one sweep. Without a StateView there
+// is no staleness threshold to apply, so every worker counts as live.
+func (c *Cleanup) listVMsAndWorkers(ctx context.Context) (*sweepState, error) {
 	if c.state != nil {
 		snap, err := c.state.Get(ctx)
-		if snap != nil {
-			return snap.VMs, snap.Workers, nil
+		if snap == nil {
+			return nil, err
 		}
-		return nil, nil, err
+		return &sweepState{
+			vms:       snap.VMs,
+			live:      snap.Workers,
+			all:       snap.AllWorkers,
+			fetchedAt: snap.FetchedAt,
+			fresh:     err == nil,
+		}, nil
 	}
 	vms, err := c.orchardClient.ListVMs(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	workers, err := c.orchardClient.ListWorkers(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return vms, workers, nil
+	return &sweepState{vms: vms, live: workers, all: workers, fetchedAt: time.Now(), fresh: true}, nil
 }
 
 // processVM evaluates one VM and, if needed, deletes it and deregisters its runner.
