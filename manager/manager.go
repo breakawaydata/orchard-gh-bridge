@@ -189,9 +189,13 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 	pruneAfter := m.cfg.WorkerPruneAfterDuration()
 	cleanup.SetWorkerPruneAfter(pruneAfter)
-	if pruneAfter > 0 {
+	switch {
+	case pruneAfter > 0:
 		m.logger.Info("pruning offline workers", "workerPruneAfter", pruneAfter)
-	} else {
+	case m.cfg.WorkerPruneDefaultSuppressed():
+		m.logger.Warn("offline worker pruning disabled: workerStaleAfter is not below the 1h workerPruneAfter default; set workerPruneAfter above it to enable",
+			"workerStaleAfter", m.staleAfter)
+	default:
 		m.logger.Info("offline worker pruning disabled")
 	}
 	cleanup.SetMetrics(m.metrics)
@@ -511,6 +515,9 @@ func workerCapacityFn(autoSize bool, reserveCPU, reserveMemMiB uint64) func([]or
 // whose labels match vmLabels. Pending VMs (no worker assignment yet) are
 // counted if their own Labels would match a label-matching worker.
 //
+// A VM whose assigned worker is no longer live is matched like a pending one,
+// by its own labels.
+//
 // Both branches are independent of the worker's Orchard Name versus its pin
 // identity: a scheduled VM's Worker field is an Orchard Name and is resolved
 // against worker Names, and a pending AutoSize VM carries PinLabelKey set to
@@ -524,7 +531,10 @@ func vmConsumesLabeledWorker(vm orchard.VM, workers []orchard.Worker, vmLabels m
 			}
 			return workerMatchesAllLabels(w, vmLabels)
 		}
-		return false
+		// Its worker is no longer live. After a rename the same machine may
+		// still be running it under a new Name with the same labels, so fall
+		// through to label matching — the same fallback freeAutoSizeWorkers
+		// applies, keeping the reported share and actual placement in step.
 	}
 	// Pending VM: if its own labels would select any of our label-matching
 	// workers, count it (belt-and-suspenders — otherwise an in-flight VM

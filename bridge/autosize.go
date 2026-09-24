@@ -149,9 +149,15 @@ func freeAutoSizeWorkers(workers []orchard.Worker, vms []orchard.VM, vmLabels ma
 // A scheduled VM reports the Orchard Name of the worker it landed on, so it is
 // mapped back through workers to that worker's pin identity; comparing the
 // Name against pin labels directly would miss every worker whose label and
-// Name differ. A VM on a worker absent from workers (one that stopped
-// heartbeating) is not counted, matching the cleanup sweep, which treats such
-// a VM as stranded rather than in use.
+// Name differ.
+//
+// A VM whose worker is absent from workers (a record that stopped
+// heartbeating) falls back to its own pin label. The usual cause is a rename:
+// the machine now heartbeats under a new Name with the same label, and the VM
+// may still be running on it, so handing that identity out again would put a
+// second full-size VM on one host. The cost is that a VM truly stranded on a
+// dead machine holds its pin identity until its job completes or cleanup
+// reaps it.
 //
 // A pending VM has no worker yet, so it is matched by the pin label the bridge
 // gave it; that stops concurrent scale-ups from both picking the same worker
@@ -170,10 +176,12 @@ func managedPinIdentities(vms []orchard.VM, workers []orchard.Worker) map[string
 			continue
 		}
 		if vm.Worker != "" {
-			if pin := pinByName[vm.Worker]; pin != "" {
-				out[pin] = true
+			if pin, known := pinByName[vm.Worker]; known {
+				if pin != "" {
+					out[pin] = true
+				}
+				continue
 			}
-			continue
 		}
 		if target := vm.Labels[PinLabelKey]; target != "" {
 			out[target] = true

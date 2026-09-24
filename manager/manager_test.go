@@ -58,6 +58,14 @@ func TestVMConsumesLabeledWorker_RenamedWorker(t *testing.T) {
 	if vmConsumesLabeledWorker(pending, workers, map[string]string{"vm-class-small": "true"}) {
 		t.Error("pending large VM counted against an unrelated pool")
 	}
+
+	// Still attributed to the pre-rename Name, which is no longer live: it
+	// holds the renamed machine's slot, as freeAutoSizeWorkers assumes.
+	onOldName := scheduled
+	onOldName.Worker = "BreakAwySFMini1.localdomain"
+	if !vmConsumesLabeledWorker(onOldName, workers, large) {
+		t.Error("VM on the pre-rename Name not counted against the large pool")
+	}
 }
 
 func TestObserveAutoSizeEligibility_OnlyAutoSizeScaleSets(t *testing.T) {

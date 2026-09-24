@@ -385,12 +385,11 @@ See [charts/orchard-gh-bridge/values.yaml](charts/orchard-gh-bridge/values.yaml)
 | `config.maxVMs` | Global VM capacity cap (0 = auto-detect from workers) |
 | `config.maxVMAge` | VM reaping safety timeout as a Go duration, e.g. `4h` (empty = 2h default). Set above the longest consuming job's `timeout-minutes` so the job timeout governs and this stays a backstop. |
 | `config.workerStaleAfter` | How long an Orchard worker may go without a heartbeat before it stops counting as capacity (Go duration, e.g. `2m`; empty = 2m default). Raise only if your workers ping infrequently — below the ping interval it will flap. |
-| `config.workerPruneAfter` | How long an Orchard worker may go without a heartbeat before the cleanup loop deletes its record (Go duration; empty = `1h` default; `"0"` disables). Must be greater than `workerStaleAfter`. Workers with VMs assigned, or with scheduling paused, are never pruned. |
+| `config.workerPruneAfter` | How long an Orchard worker may go without a heartbeat before the cleanup loop deletes its record (Go duration; empty = `1h` default; `"0"` disables). An explicit value must be greater than `workerStaleAfter`; if it is unset and `workerStaleAfter` is 1h or more, pruning stays off (logged as a WARN at startup). Workers with VMs assigned, or with scheduling paused, are never pruned. |
 | `config.maxPendingAge` | How long a managed VM may sit in `pending` before it is reaped as stuck (Go duration; empty = `10m` default). Raise it if a worker's first pull of a large Tart image takes longer. |
-| `config.metrics` | `enabled`, `port` (default 9090): serve Prometheus metrics at `/metrics`. Set `metrics.enabled` too so the chart exposes the port. |
 | `existingSecret` | Name of a pre-created K8s Secret |
 | `externalSecret` | External Secrets Operator config |
-| `metrics` | Prometheus ServiceMonitor config |
+| `metrics` | `enabled`, `port` (default 9090): serve Prometheus metrics at `/metrics` and expose the port; `serviceMonitor` config |
 | `resources` | CPU/memory requests and limits |
 
 ## Local development
@@ -459,7 +458,7 @@ The bridge exposes health endpoints:
 - `GET /healthz` -- liveness probe (always returns 200)
 - `GET /readyz` -- readiness probe (checks Orchard controller connectivity)
 
-With `config.metrics.enabled: true` it also serves Prometheus metrics at `GET /metrics` on `config.metrics.port` (default 9090). Enable the chart's top-level `metrics.enabled` as well so the port, scrape annotations and optional ServiceMonitor are rendered.
+With metrics enabled it also serves Prometheus metrics at `GET /metrics` on the metrics port (default 9090). In the Helm chart, the top-level `metrics.enabled` / `metrics.port` drive both the bridge's server (they are rendered into `config.metrics`) and the Service, scrape annotations and optional ServiceMonitor, so the two cannot disagree. Outside the chart, set `metrics.enabled` / `metrics.port` in the config file.
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|

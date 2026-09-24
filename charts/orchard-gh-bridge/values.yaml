@@ -33,6 +33,8 @@ service:
   type: ClusterIP
   port: 8080
 
+# Serves Prometheus metrics at /metrics on this port. The chart renders these
+# values into config.metrics as well, so the app and the Service always agree.
 metrics:
   enabled: false
   port: 9090
@@ -115,12 +117,6 @@ config:
     #       reserveMemoryMiB: 4096  # Held back for host overhead. Default 4096.
   health:
     port: 8080
-  # Serves Prometheus metrics at /metrics. Enable the top-level metrics.enabled
-  # too so the chart exposes the port.
-  metrics:
-    enabled: false
-    port: 9090
-
 # --- Secrets ---
 # Option 1: Reference a pre-created Kubernetes Secret
 # The secret should contain keys matching env var names:

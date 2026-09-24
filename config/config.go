@@ -231,10 +231,12 @@ func (c *Config) Validate() error {
 		}
 	}
 	// Pruning a worker the bridge still counts as live would delete the record
-	// of a machine that is merely slow to heartbeat, so the prune threshold
-	// must sit strictly beyond the staleness one. Compared on effective values
-	// so an explicit workerStaleAfter cannot silently overtake the default.
-	if prune, stale := c.WorkerPruneAfterDuration(), c.effectiveWorkerStaleAfter(); prune > 0 && stale > 0 && prune <= stale {
+	// of a machine that is merely slow to heartbeat, so an explicit prune
+	// threshold must sit strictly beyond the staleness one. An unset one never
+	// fails validation: WorkerPruneAfterDuration disables the default instead,
+	// so a config with a long workerStaleAfter that was valid before
+	// workerPruneAfter existed still starts.
+	if prune, stale := c.WorkerPruneAfterDuration(), c.effectiveWorkerStaleAfter(); c.WorkerPruneAfter != "" && prune > 0 && stale > 0 && prune <= stale {
 		errs = append(errs, fmt.Sprintf("workerPruneAfter (%s) must be greater than workerStaleAfter (%s)", prune, stale))
 	}
 
@@ -306,9 +308,15 @@ func (c *Config) effectiveWorkerStaleAfter() time.Duration {
 
 // WorkerPruneAfterDuration returns the heartbeat age past which offline worker
 // records are deleted: DefaultWorkerPruneAfter when unset, 0 when explicitly
-// disabled ("0") or unparseable (Validate rejects the latter).
+// disabled ("0") or unparseable (Validate rejects the latter). When unset and
+// workerStaleAfter is at or beyond the default, pruning is off (see
+// WorkerPruneDefaultSuppressed): the default must never prune a worker the
+// bridge still counts as live.
 func (c *Config) WorkerPruneAfterDuration() time.Duration {
 	if c.WorkerPruneAfter == "" {
+		if c.WorkerPruneDefaultSuppressed() {
+			return 0
+		}
 		return DefaultWorkerPruneAfter
 	}
 	d, err := time.ParseDuration(c.WorkerPruneAfter)
@@ -316,6 +324,12 @@ func (c *Config) WorkerPruneAfterDuration() time.Duration {
 		return 0
 	}
 	return d
+}
+
+// WorkerPruneDefaultSuppressed reports whether workerPruneAfter is unset and
+// the default is switched off because workerStaleAfter is not below it.
+func (c *Config) WorkerPruneDefaultSuppressed() bool {
+	return c.WorkerPruneAfter == "" && c.effectiveWorkerStaleAfter() >= DefaultWorkerPruneAfter
 }
 
 // MaxPendingAgeDuration returns the configured stuck-pending reaping age, or 0

@@ -322,7 +322,12 @@ func TestLoad_WorkerPruneAfter(t *testing.T) {
 		{name: "negative", yaml: "workerPruneAfter: -1h", wantErr: "must not be negative"},
 		{name: "equal to default staleAfter", yaml: "workerPruneAfter: 2m", wantErr: "must be greater than workerStaleAfter"},
 		{name: "below explicit staleAfter", yaml: "workerStaleAfter: 30m\nworkerPruneAfter: 10m", wantErr: "must be greater than workerStaleAfter"},
-		{name: "default prune vs longer explicit staleAfter", yaml: "workerStaleAfter: 2h", wantErr: "must be greater than workerStaleAfter"},
+		// Valid before workerPruneAfter existed, so it must still load; the
+		// default prune is switched off rather than failing startup.
+		{name: "unset prune with staleAfter above the default", yaml: "workerStaleAfter: 2h", want: 0},
+		{name: "unset prune with staleAfter equal to the default", yaml: "workerStaleAfter: 1h", want: 0},
+		{name: "explicit prune vs longer staleAfter", yaml: "workerStaleAfter: 2h\nworkerPruneAfter: 1h", wantErr: "must be greater than workerStaleAfter"},
+		{name: "explicit prune above long staleAfter", yaml: "workerStaleAfter: 2h\nworkerPruneAfter: 3h", want: 3 * time.Hour},
 		{name: "above explicit staleAfter", yaml: "workerStaleAfter: 30m\nworkerPruneAfter: 31m", want: 31 * time.Minute},
 	}
 	for _, tc := range tests {

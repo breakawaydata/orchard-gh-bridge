@@ -117,6 +117,24 @@ func TestEligibilityMonitor_ReasonChangeWarnsAgain(t *testing.T) {
 	}
 }
 
+func TestEligibilityMonitor_DuplicatePartnerChangeWarnsAgain(t *testing.T) {
+	now := time.Now()
+	var buf bytes.Buffer
+	m := NewEligibilityMonitor(captureLogger(&buf), nil)
+	a := mkRenamedWorker("mini-a", "shared", 10, 32768, now, nil)
+	b := mkRenamedWorker("mini-b", "shared", 10, 32768, now, nil)
+	c := mkRenamedWorker("mini-c", "shared", 10, 32768, now, nil)
+	m.Observe("large", []orchard.Worker{a, b}, nil, 4, 4096)
+	buf.Reset()
+	// mini-b leaves and mini-c arrives with the same label: mini-a is still
+	// excluded for the same reason, but against a different worker.
+	m.Observe("large", []orchard.Worker{a, c}, nil, 4, 4096)
+	out := buf.String()
+	if !strings.Contains(out, "worker=mini-a") || !strings.Contains(out, "sharedWith=mini-c") {
+		t.Errorf("changed duplicate partner not re-warned:\n%s", out)
+	}
+}
+
 func TestEligibilityMonitor_BelowReservesIsReported(t *testing.T) {
 	var buf bytes.Buffer
 	m := NewEligibilityMonitor(captureLogger(&buf), nil)

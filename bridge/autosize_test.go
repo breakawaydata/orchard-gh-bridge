@@ -170,7 +170,11 @@ func TestFreeAutoSizeWorkers_PendingVMMatchedByPinLabel(t *testing.T) {
 	}
 }
 
-func TestFreeAutoSizeWorkers_VMOnDepartedWorkerDoesNotBlock(t *testing.T) {
+// TestFreeAutoSizeWorkers_VMOnRenamedWorkersOldNameStillBlocks: a worker was
+// renamed while a VM was running on it. Orchard still attributes the VM to the
+// old, now-offline Name, but the machine (live under its new Name, same label)
+// may still be running it, so its pin identity must not be handed out again.
+func TestFreeAutoSizeWorkers_VMOnRenamedWorkersOldNameStillBlocks(t *testing.T) {
 	now := time.Now()
 	// Only the live renamed worker is in the (live) list; the VM sits on the
 	// stale record's Name, which is no longer there.
@@ -183,8 +187,14 @@ func TestFreeAutoSizeWorkers_VMOnDepartedWorkerDoesNotBlock(t *testing.T) {
 		Status: orchard.VMStatusRunning,
 		Labels: map[string]string{PinLabelKey: "BreakAwySFMini1.localdomain"},
 	}}
+	if free := freeAutoSizeWorkers(workers, vms, nil, 4, 4096); len(free) != 0 {
+		t.Errorf("freeAutoSizeWorkers = %+v, want none (VM under the old Name still holds the pin identity)", free)
+	}
+
+	// Once that VM is gone the renamed worker is free again.
+	vms[0].Status = orchard.VMStatusStopped
 	if free := freeAutoSizeWorkers(workers, vms, nil, 4, 4096); len(free) != 1 {
-		t.Errorf("freeAutoSizeWorkers = %+v, want the live worker (stranded VM is not in use)", free)
+		t.Errorf("freeAutoSizeWorkers = %+v, want the renamed worker once the VM stopped", free)
 	}
 }
 

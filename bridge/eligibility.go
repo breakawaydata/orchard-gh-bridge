@@ -104,7 +104,7 @@ func (m *EligibilityMonitor) Observe(scaleSet string, workers []orchard.Worker, 
 	for _, name := range sortedKeys(current) {
 		ex := current[name]
 		old, had := prev[name]
-		if had && old.Reason == ex.Reason && old.PinLabel == ex.PinLabel {
+		if had && sameExclusion(old, ex) {
 			continue
 		}
 		if had {
@@ -142,6 +142,13 @@ func (m *EligibilityMonitor) Observe(scaleSet string, workers []orchard.Worker, 
 
 	m.last[scaleSet] = current
 	m.eligible.Set(float64(WorkerCountForLabels(workers, vmLabels, reserveCPU, reserveMemMiB)), scaleSet)
+}
+
+// sameExclusion reports whether two observations describe the same state. A
+// duplicate whose other holder changed is a new conflict and is warned again.
+func sameExclusion(a, b AutoSizeExclusion) bool {
+	return a.Reason == b.Reason && a.PinLabel == b.PinLabel &&
+		strings.Join(a.SharedWith, ",") == strings.Join(b.SharedWith, ",")
 }
 
 func sortedKeys[V any](m map[string]V) []string {
