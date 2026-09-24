@@ -152,6 +152,55 @@ func TestStateView_ReturnsLastSnapshotOnRefreshError(t *testing.T) {
 	}
 }
 
+// TestStateView_JoinersSeeLeaderRefreshError: a caller that joins an in-flight
+// refresh which then fails must get the error alongside the retained snapshot,
+// not a nil error that makes the old snapshot look fresh. The cleanup loop
+// relies on this to avoid pruning workers from outdated state.
+func TestStateView_JoinersSeeLeaderRefreshError(t *testing.T) {
+	c := newCountingOrchard()
+	sv := NewStateView(c, 5*time.Millisecond, DefaultWorkerStaleAfter)
+	if _, err := sv.Get(context.Background()); err != nil {
+		t.Fatalf("priming Get: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	c.listErr = errors.New("orchard down")
+	c.blockList = make(chan struct{})
+
+	const n = 5
+	errs := make(chan error, n)
+	snaps := make(chan *Snapshot, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			snap, err := sv.Get(context.Background())
+			snaps <- snap
+			errs <- err
+		}()
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(c.blockList)
+	wg.Wait()
+	close(errs)
+	close(snaps)
+
+	for err := range errs {
+		if err == nil {
+			t.Error("a caller got a nil error from a failed refresh")
+		}
+	}
+	for snap := range snaps {
+		if snap == nil {
+			t.Error("a caller got no snapshot; the retained one should be returned")
+		}
+	}
+	if got := c.listVMCalls.Load(); got != 2 {
+		t.Errorf("ListVMs calls = %d, want 2 (priming + one coalesced refresh)", got)
+	}
+}
+
 func TestSnapshot_ManagedVMsForScaleSet(t *testing.T) {
 	snap := newSnapshot([]orchard.VM{
 		{Name: "gha-orchard-macos-tahoe-xcode-26-4-aaaa"},
