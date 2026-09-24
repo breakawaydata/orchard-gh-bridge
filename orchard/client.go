@@ -21,6 +21,11 @@ type Client interface {
 	ListVMs(ctx context.Context) ([]VM, error)
 	DeleteVM(ctx context.Context, name string) error
 	ListWorkers(ctx context.Context) ([]Worker, error)
+	// DeleteWorker removes a worker record from the controller
+	// (DELETE /v1/workers/{name}). A worker that is already gone is not an
+	// error. A worker that is still running re-registers itself on its next
+	// connection, so this only discards the record, never the machine.
+	DeleteWorker(ctx context.Context, name string) error
 	Ping(ctx context.Context) error
 }
 
@@ -112,6 +117,16 @@ func (c *officialClient) ListWorkers(ctx context.Context) ([]Worker, error) {
 		workers[i] = fromV1Worker(w)
 	}
 	return workers, nil
+}
+
+func (c *officialClient) DeleteWorker(ctx context.Context, name string) error {
+	if err := c.inner.Workers().Delete(ctx, name); err != nil {
+		if isNotFound(err) {
+			return nil // already gone
+		}
+		return fmt.Errorf("deleting worker: %w", err)
+	}
+	return nil
 }
 
 func (c *officialClient) Ping(ctx context.Context) error {

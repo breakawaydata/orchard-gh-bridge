@@ -13,6 +13,7 @@ import (
 
 	brdg "github.com/breakawaydata/orchard-gh-bridge/bridge"
 	"github.com/breakawaydata/orchard-gh-bridge/config"
+	"github.com/breakawaydata/orchard-gh-bridge/metrics"
 	"github.com/breakawaydata/orchard-gh-bridge/orchard"
 )
 
@@ -35,6 +36,12 @@ type Manager struct {
 	// counting as capacity. Shared with state so every path agrees.
 	staleAfter time.Duration
 
+	// metrics is where the manager and its cleanup loop register their
+	// metrics. May be nil.
+	metrics *metrics.Registry
+	// eligibility reports AutoSize workers that are left out of a pool.
+	eligibility *brdg.EligibilityMonitor
+
 	// cleanup is set once in Run before any scale set starts, so runScaleSet
 	// can hand it VMs whose delete failed.
 	cleanup *brdg.Cleanup
@@ -47,7 +54,8 @@ type Manager struct {
 	handles   []*scaleSetHandle
 }
 
-func New(cfg *config.Config, orchardClient orchard.Client, logger *slog.Logger) (*Manager, error) {
+// New builds a manager. reg receives the manager's metrics and may be nil.
+func New(cfg *config.Config, orchardClient orchard.Client, logger *slog.Logger, reg *metrics.Registry) (*Manager, error) {
 	mgrLogger := logger.With("component", "manager")
 
 	maxVMs := cfg.MaxVMs
@@ -75,6 +83,8 @@ func New(cfg *config.Config, orchardClient orchard.Client, logger *slog.Logger) 
 		capacity:      brdg.NewCapacity(maxVMs),
 		state:         brdg.NewStateView(orchardClient, brdg.DefaultStateViewTTL, staleAfter),
 		staleAfter:    staleAfter,
+		metrics:       reg,
+		eligibility:   brdg.NewEligibilityMonitor(logger, reg),
 	}
 
 	m.newGHClient = m.defaultNewGHClient
@@ -173,6 +183,19 @@ func (m *Manager) Run(ctx context.Context) error {
 		cleanup.SetMaxAge(maxAge)
 		m.logger.Info("overriding VM reaping age from config", "maxVMAge", maxAge)
 	}
+	if maxPending := m.cfg.MaxPendingAgeDuration(); maxPending > 0 {
+		cleanup.SetMaxPendingAge(maxPending)
+		m.logger.Info("overriding stuck-pending reaping age from config", "maxPendingAge", maxPending)
+	}
+	pruneAfter := m.cfg.WorkerPruneAfterDuration()
+	cleanup.SetWorkerPruneAfter(pruneAfter)
+	if pruneAfter > 0 {
+		m.logger.Info("pruning offline workers", "workerPruneAfter", pruneAfter)
+	} else {
+		m.logger.Info("offline worker pruning disabled")
+	}
+	cleanup.SetMetrics(m.metrics)
+	cleanup.SetOnSweep(m.observeAutoSizeEligibility)
 	cleanup.SetOnVMCleaned(func(vmName string) {
 		m.bridgesMu.Lock()
 		handles := make([]*scaleSetHandle, len(m.handles))
@@ -199,6 +222,20 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 
 	return g.Wait()
+}
+
+// observeAutoSizeEligibility reports, for every AutoSize scale set in config,
+// which live label-matching workers it cannot use and why. Driven from the
+// cleanup sweep, so it runs even while a scale set is still waiting for its
+// first eligible worker — the moment an explanation is most needed.
+func (m *Manager) observeAutoSizeEligibility(workers []orchard.Worker) {
+	for _, ss := range m.cfg.ScaleSets {
+		if !ss.VM.AutoSize.Enabled {
+			continue
+		}
+		cpu, mem := brdg.AutoSizeReserves(ss.VM.AutoSize.ReserveCPU, ss.VM.AutoSize.ReserveMemoryMiB)
+		m.eligibility.Observe(ss.Name, workers, ss.VM.Labels, cpu, mem)
+	}
 }
 
 func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) error {
@@ -473,6 +510,12 @@ func workerCapacityFn(autoSize bool, reserveCPU, reserveMemMiB uint64) func([]or
 // vmConsumesLabeledWorker returns true if vm occupies a slot on a worker
 // whose labels match vmLabels. Pending VMs (no worker assignment yet) are
 // counted if their own Labels would match a label-matching worker.
+//
+// Both branches are independent of the worker's Orchard Name versus its pin
+// identity: a scheduled VM's Worker field is an Orchard Name and is resolved
+// against worker Names, and a pending AutoSize VM carries PinLabelKey set to
+// the target's pin identity, which is matched against worker labels the same
+// way Orchard's scheduler matches it.
 func vmConsumesLabeledWorker(vm orchard.VM, workers []orchard.Worker, vmLabels map[string]string) bool {
 	if vm.Worker != "" {
 		for _, w := range workers {

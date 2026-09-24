@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -280,5 +281,89 @@ func TestGitHubPrivateKeyPEM_File(t *testing.T) {
 	}
 	if pem != "file-pem" {
 		t.Errorf("got %q, want file-pem", pem)
+	}
+}
+
+// loadWith writes a minimal valid config plus extra top-level keys and loads it.
+func loadWith(t *testing.T, extra string) (*Config, error) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := extra + `
+orchard:
+  address: http://localhost:6120
+github:
+  token: ghp_test
+scaleSets:
+  - name: test
+    githubConfigURL: https://github.com/org
+    vm:
+      image: test-image
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return Load(path)
+}
+
+func TestLoad_WorkerPruneAfter(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		want    time.Duration
+		wantErr string
+	}{
+		{name: "unset defaults to 1h", yaml: "", want: time.Hour},
+		{name: "explicit", yaml: "workerPruneAfter: 3h", want: 3 * time.Hour},
+		{name: "string zero disables", yaml: `workerPruneAfter: "0"`, want: 0},
+		{name: "bare zero disables", yaml: "workerPruneAfter: 0", want: 0},
+		{name: "0s disables", yaml: "workerPruneAfter: 0s", want: 0},
+		{name: "zero disables even with long staleAfter", yaml: "workerStaleAfter: 2h\nworkerPruneAfter: 0", want: 0},
+		{name: "invalid", yaml: "workerPruneAfter: soon", wantErr: "workerPruneAfter"},
+		{name: "negative", yaml: "workerPruneAfter: -1h", wantErr: "must not be negative"},
+		{name: "equal to default staleAfter", yaml: "workerPruneAfter: 2m", wantErr: "must be greater than workerStaleAfter"},
+		{name: "below explicit staleAfter", yaml: "workerStaleAfter: 30m\nworkerPruneAfter: 10m", wantErr: "must be greater than workerStaleAfter"},
+		{name: "default prune vs longer explicit staleAfter", yaml: "workerStaleAfter: 2h", wantErr: "must be greater than workerStaleAfter"},
+		{name: "above explicit staleAfter", yaml: "workerStaleAfter: 30m\nworkerPruneAfter: 31m", want: 31 * time.Minute},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadWith(t, tc.yaml)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := cfg.WorkerPruneAfterDuration(); got != tc.want {
+				t.Errorf("WorkerPruneAfterDuration = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_MaxPendingAge(t *testing.T) {
+	cfg, err := loadWith(t, "maxPendingAge: 45m")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.MaxPendingAgeDuration(); got != 45*time.Minute {
+		t.Errorf("MaxPendingAgeDuration = %v, want 45m", got)
+	}
+
+	cfg, err = loadWith(t, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.MaxPendingAgeDuration(); got != 0 {
+		t.Errorf("MaxPendingAgeDuration = %v, want 0 when unset (caller keeps the 10m default)", got)
+	}
+
+	for _, bad := range []string{"maxPendingAge: later", "maxPendingAge: 0s", "maxPendingAge: -5m"} {
+		if _, err := loadWith(t, bad); err == nil || !strings.Contains(err.Error(), "maxPendingAge") {
+			t.Errorf("%s: err = %v, want a maxPendingAge validation error", bad, err)
+		}
 	}
 }

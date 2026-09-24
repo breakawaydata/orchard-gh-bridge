@@ -75,6 +75,16 @@ config:
   # Workers ping every few seconds, so the default is many missed beats; setting
   # this below the ping interval will flap capacity.
   # workerStaleAfter: ""
+  # workerPruneAfter is how long an Orchard worker may go without a heartbeat
+  # before the cleanup loop deletes its record (Go duration). Empty = 1h default;
+  # "0" disables. Must be greater than workerStaleAfter. Workers with VMs
+  # assigned, or with scheduling paused, are never pruned; a running worker
+  # re-registers itself on its next connection.
+  # workerPruneAfter: ""
+  # maxPendingAge is how long a managed VM may sit in pending before it is reaped
+  # as stuck (Go duration). Empty = 10m default. Raise it if a worker's first
+  # pull of a large Tart image takes longer.
+  # maxPendingAge: ""
   orchard:
     address: "http://orchard-controller:6120"
     username: "bootstrap-admin"
@@ -105,6 +115,8 @@ config:
     #       reserveMemoryMiB: 4096  # Held back for host overhead. Default 4096.
   health:
     port: 8080
+  # Serves Prometheus metrics at /metrics. Enable the top-level metrics.enabled
+  # too so the chart exposes the port.
   metrics:
     enabled: false
     port: 9090

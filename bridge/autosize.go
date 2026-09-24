@@ -16,7 +16,11 @@ const (
 
 	// PinLabelKey is the label key both VMs and workers use to pin AutoSize
 	// VMs to the worker their CPU/memory was computed from. Each AutoSize-
-	// eligible worker must register with `--labels orchard-gh-bridge/worker-name=<itsOrchardName>`.
+	// eligible worker registers with `--labels orchard-gh-bridge/worker-name=<id>`,
+	// and <id> — not the worker's Orchard Name — is its pin identity. The two
+	// usually match, but a worker's Name defaults to its hostname and silently
+	// changes with it (a macOS upgrade is enough), while the label lives in the
+	// host's launchd plist and does not. See PinIdentity.
 	PinLabelKey = "orchard-gh-bridge/worker-name"
 
 	// DefaultAutoSizeReserveCPU is held back from the VM for host overhead.
@@ -31,77 +35,81 @@ const (
 	DefaultAutoSizeReserveMemoryMiB = uint64(4096)
 )
 
-// AutoSizeEligible reports whether a worker is a candidate for AutoSize
-// placement: not paused, advertises both core and memory resources, and
-// self-labels under PinLabelKey with its own Orchard Name.
-func AutoSizeEligible(w orchard.Worker) bool {
-	if w.SchedulingPaused {
-		return false
-	}
-	if w.Labels[PinLabelKey] != w.Name {
-		return false
-	}
-	if _, ok := w.Resources[resourceLogicalCores]; !ok {
-		return false
-	}
-	if _, ok := w.Resources[resourceMemoryMiB]; !ok {
-		return false
-	}
-	return true
+// Reasons a label-matching live worker is left out of AutoSize placement.
+// They double as the `reason` label on the exclusion metric, so they are
+// stable, lower-case identifiers.
+const (
+	ExclusionSchedulingPaused  = "scheduling_paused"
+	ExclusionMissingPinLabel   = "missing_pin_label"
+	ExclusionDuplicatePinLabel = "duplicate_pin_label"
+	ExclusionMissingResources  = "missing_resources"
+	ExclusionBelowReserves     = "below_reserves"
+)
+
+// PinIdentity returns the identity AutoSize pins VMs by: the worker's
+// PinLabelKey label value, or "" if it has none.
+//
+// It is deliberately not the Orchard Name. Orchard schedules a pinned VM onto
+// whichever worker carries the matching label, so the label is the thing that
+// actually decides placement; requiring it to also equal the Name meant a
+// hostname change dropped the machine from every AutoSize pool without a word.
+func PinIdentity(w orchard.Worker) string {
+	return w.Labels[PinLabelKey]
 }
 
-// AutoSizeEligibleWithReserves reports whether a worker is a candidate for
-// AutoSize placement AND has enough resources to satisfy the given reserves.
-// Workers that pass AutoSizeEligible but have cores <= reserveCPU or
-// memory <= reserveMemMiB would be skipped by AutoSizedVM anyway; excluding
-// them here keeps WorkerCountForLabels and freeAutoSizeWorkers accurate.
-func AutoSizeEligibleWithReserves(w orchard.Worker, reserveCPU, reserveMemMiB uint64) bool {
-	if !AutoSizeEligible(w) {
-		return false
-	}
-	if w.Resources[resourceLogicalCores] <= reserveCPU {
-		return false
-	}
-	if w.Resources[resourceMemoryMiB] <= reserveMemMiB {
-		return false
-	}
-	return true
-}
-
-// WorkerCountForLabels returns the number of label-matching, AutoSize-eligible
-// workers that can satisfy the given reserves. Used as the per-scale-set
-// capacity ceiling when AutoSize is enabled: each worker hosts at most one
-// managed VM, so the ceiling is the schedulable worker count, not the sum of
-// tart-vms slots.
-func WorkerCountForLabels(workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB uint64) int {
-	var n int
+// PinCounts returns how many of the given workers hold each pin identity.
+// Callers pass live workers, so a stale record left behind by a rename does
+// not make its successor's identity look shared.
+func PinCounts(workers []orchard.Worker) map[string]int {
+	out := make(map[string]int, len(workers))
 	for _, w := range workers {
-		if !AutoSizeEligibleWithReserves(w, reserveCPU, reserveMemMiB) {
-			continue
+		if pin := PinIdentity(w); pin != "" {
+			out[pin]++
 		}
-		if !workerMatchesLabels(w, vmLabels) {
-			continue
-		}
-		n++
 	}
-	return n
+	return out
 }
 
-// freeAutoSizeWorkers returns AutoSize-eligible workers that match vmLabels,
-// have enough resources to satisfy the given reserves, and have no managed VM
-// currently assigned (or pending-pinned) to them.
-// Returned in input order so placement is deterministic for tests.
-func freeAutoSizeWorkers(workers []orchard.Worker, vms []orchard.VM, vmLabels map[string]string, reserveCPU, reserveMemMiB uint64) []orchard.Worker {
-	inUse := managedWorkersByName(vms)
+// AutoSizeExclusionReason returns why w cannot take an AutoSize VM with the
+// given reserves, or "" if it can. pinCounts must come from PinCounts over the
+// same live worker set: a pin identity held by more than one live worker is
+// unusable, because Orchard could schedule the pinned VM onto either holder
+// and the bridge sized it for only one of them.
+func AutoSizeExclusionReason(w orchard.Worker, pinCounts map[string]int, reserveCPU, reserveMemMiB uint64) string {
+	if w.SchedulingPaused {
+		return ExclusionSchedulingPaused
+	}
+	pin := PinIdentity(w)
+	if pin == "" {
+		return ExclusionMissingPinLabel
+	}
+	if pinCounts[pin] > 1 {
+		return ExclusionDuplicatePinLabel
+	}
+	cores, okCores := w.Resources[resourceLogicalCores]
+	mem, okMem := w.Resources[resourceMemoryMiB]
+	if !okCores || !okMem {
+		return ExclusionMissingResources
+	}
+	// Workers with cores <= reserveCPU or memory <= reserveMemMiB would be
+	// rejected by AutoSizedVM anyway; excluding them here keeps
+	// WorkerCountForLabels and freeAutoSizeWorkers accurate.
+	if cores <= reserveCPU || mem <= reserveMemMiB {
+		return ExclusionBelowReserves
+	}
+	return ""
+}
+
+// autoSizeCandidates returns the workers that match vmLabels and can take an
+// AutoSize VM with the given reserves, in input order.
+func autoSizeCandidates(workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB uint64) []orchard.Worker {
+	counts := PinCounts(workers)
 	out := make([]orchard.Worker, 0, len(workers))
 	for _, w := range workers {
-		if !AutoSizeEligibleWithReserves(w, reserveCPU, reserveMemMiB) {
-			continue
-		}
 		if !workerMatchesLabels(w, vmLabels) {
 			continue
 		}
-		if inUse[w.Name] {
+		if AutoSizeExclusionReason(w, counts, reserveCPU, reserveMemMiB) != "" {
 			continue
 		}
 		out = append(out, w)
@@ -109,11 +117,50 @@ func freeAutoSizeWorkers(workers []orchard.Worker, vms []orchard.VM, vmLabels ma
 	return out
 }
 
-// managedWorkersByName returns workers that currently host a non-terminal
-// managed VM. A pending VM is matched to its target worker via PinLabelKey so
-// concurrent scale-up requests don't both pick the same worker before its
-// freshly-created VM has been scheduled.
-func managedWorkersByName(vms []orchard.VM) map[string]bool {
+// WorkerCountForLabels returns the number of label-matching, AutoSize-eligible
+// workers that can satisfy the given reserves. Used as the per-scale-set
+// capacity ceiling when AutoSize is enabled: each worker hosts at most one
+// managed VM, so the ceiling is the schedulable worker count, not the sum of
+// tart-vms slots. workers must be the live set (see PinCounts).
+func WorkerCountForLabels(workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB uint64) int {
+	return len(autoSizeCandidates(workers, vmLabels, reserveCPU, reserveMemMiB))
+}
+
+// freeAutoSizeWorkers returns AutoSize-eligible workers that match vmLabels,
+// have enough resources to satisfy the given reserves, and have no managed VM
+// currently assigned (or pending-pinned) to their pin identity.
+// Returned in input order so placement is deterministic for tests.
+func freeAutoSizeWorkers(workers []orchard.Worker, vms []orchard.VM, vmLabels map[string]string, reserveCPU, reserveMemMiB uint64) []orchard.Worker {
+	inUse := managedPinIdentities(vms, workers)
+	candidates := autoSizeCandidates(workers, vmLabels, reserveCPU, reserveMemMiB)
+	out := candidates[:0]
+	for _, w := range candidates {
+		if inUse[PinIdentity(w)] {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// managedPinIdentities returns the pin identities of workers that currently
+// host, or are about to host, a non-terminal managed VM.
+//
+// A scheduled VM reports the Orchard Name of the worker it landed on, so it is
+// mapped back through workers to that worker's pin identity; comparing the
+// Name against pin labels directly would miss every worker whose label and
+// Name differ. A VM on a worker absent from workers (one that stopped
+// heartbeating) is not counted, matching the cleanup sweep, which treats such
+// a VM as stranded rather than in use.
+//
+// A pending VM has no worker yet, so it is matched by the pin label the bridge
+// gave it; that stops concurrent scale-ups from both picking the same worker
+// before its freshly-created VM has been scheduled.
+func managedPinIdentities(vms []orchard.VM, workers []orchard.Worker) map[string]bool {
+	pinByName := make(map[string]string, len(workers))
+	for _, w := range workers {
+		pinByName[w.Name] = PinIdentity(w)
+	}
 	out := make(map[string]bool, len(vms))
 	for _, vm := range vms {
 		if !IsManagedVM(vm.Name) {
@@ -123,10 +170,12 @@ func managedWorkersByName(vms []orchard.VM) map[string]bool {
 			continue
 		}
 		if vm.Worker != "" {
-			out[vm.Worker] = true
+			if pin := pinByName[vm.Worker]; pin != "" {
+				out[pin] = true
+			}
 			continue
 		}
-		if target, ok := vm.Labels[PinLabelKey]; ok && target != "" {
+		if target := vm.Labels[PinLabelKey]; target != "" {
 			out[target] = true
 		}
 	}

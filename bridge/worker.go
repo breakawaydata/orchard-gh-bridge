@@ -3,6 +3,7 @@ package bridge
 import (
 	"time"
 
+	"github.com/breakawaydata/orchard-gh-bridge/config"
 	"github.com/breakawaydata/orchard-gh-bridge/orchard"
 )
 
@@ -16,7 +17,7 @@ import (
 // GitHub job for every VM it creates, so a worker that is counted but cannot
 // actually run anything does not sit idle — it repeatedly acquires jobs, fails
 // to start them, and hands them back, starving the queue for everyone else.
-const DefaultWorkerStaleAfter = 2 * time.Minute
+const DefaultWorkerStaleAfter = config.DefaultWorkerStaleAfter
 
 // WorkerLive reports whether w has heartbeated recently enough that Orchard can
 // still place a VM on it.
