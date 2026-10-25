@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	v1 "github.com/cirruslabs/orchard/pkg/resource/v1"
@@ -66,6 +68,50 @@ func TestCreateVM(t *testing.T) {
 	}
 	if vm.Status != VMStatusCreating {
 		t.Errorf("status = %q, want creating", vm.Status)
+	}
+}
+
+// createVMBody runs CreateVM against a fake controller and returns the raw
+// POST /v1/vms body it sent.
+func createVMBody(t *testing.T, in *VM) string {
+	t.Helper()
+	var body string
+	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/vms":
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = string(raw)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/vms/"+in.Name:
+			_ = json.NewEncoder(w).Encode(v1.VM{Meta: v1.Meta{Name: in.Name}, Status: v1.VMStatusPending})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	if _, err := c.CreateVM(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func TestCreateVM_SendsDiskSize(t *testing.T) {
+	body := createVMBody(t, &VM{Name: "test-vm", Image: "test-image", CPU: 4, DiskSize: 200})
+	var sent v1.VM
+	if err := json.Unmarshal([]byte(body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.DiskSize != 200 {
+		t.Errorf("sent diskSize = %d, want 200 (body: %s)", sent.DiskSize, body)
+	}
+}
+
+func TestCreateVM_OmitsDiskSizeWhenUnset(t *testing.T) {
+	body := createVMBody(t, &VM{Name: "test-vm", Image: "test-image", CPU: 4})
+	if strings.Contains(body, "diskSize") {
+		t.Errorf("diskSize must be absent when unset so Orchard keeps the image size: %s", body)
 	}
 }
 
