@@ -3,11 +3,15 @@ package orchard
 import "time"
 
 type VM struct {
-	Name          string            `json:"name"`
-	Image         string            `json:"image"`
-	CPU           uint64            `json:"cpu"`
-	Memory        uint64            `json:"memory"`
-	Nested        bool              `json:"nested,omitempty"`
+	Name   string `json:"name"`
+	Image  string `json:"image"`
+	CPU    uint64 `json:"cpu"`
+	Memory uint64 `json:"memory"`
+	Nested bool   `json:"nested,omitempty"`
+	// DiskSize resizes the VM's disk to this many GB after clone (Orchard
+	// runs `tart set --disk-size`). Zero is omitted, so the image's own disk
+	// size is kept.
+	DiskSize      uint64            `json:"diskSize,omitempty"`
 	Status        string            `json:"status,omitempty"`
 	StatusMessage string            `json:"statusMessage,omitempty"`
 	Worker        string            `json:"worker,omitempty"`

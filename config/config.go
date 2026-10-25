@@ -83,12 +83,16 @@ type ScaleSetConfig struct {
 }
 
 type VMConfig struct {
-	Image      string            `yaml:"image"`
-	CPU        uint64            `yaml:"cpu"`
-	Memory     uint64            `yaml:"memory"`
-	DockerPort int               `yaml:"dockerPort"`
-	Labels     map[string]string `yaml:"labels"`
-	AutoSize   AutoSizeConfig    `yaml:"autoSize,omitempty"`
+	Image      string `yaml:"image"`
+	CPU        uint64 `yaml:"cpu"`
+	Memory     uint64 `yaml:"memory"`
+	DockerPort int    `yaml:"dockerPort"`
+	// DiskSize, when set, grows each VM's disk to this many GB at creation.
+	// Unset (0) keeps the image's default disk size. Tart can only grow a
+	// disk, so a value below the image's size makes VM creation fail.
+	DiskSize uint64            `yaml:"diskSize,omitempty"`
+	Labels   map[string]string `yaml:"labels"`
+	AutoSize AutoSizeConfig    `yaml:"autoSize,omitempty"`
 }
 
 // AutoSizeConfig opts a scale set into per-host VM sizing.

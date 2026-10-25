@@ -57,6 +57,37 @@ scaleSets:
 	if ss.VM.Memory != 8192 {
 		t.Errorf("VM.Memory = %d, want 8192 (default)", ss.VM.Memory)
 	}
+	if ss.VM.DiskSize != 0 {
+		t.Errorf("VM.DiskSize = %d, want 0 (unset keeps the image size)", ss.VM.DiskSize)
+	}
+}
+
+func TestLoad_DiskSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+orchard:
+  address: http://localhost:6120
+github:
+  token: ghp_test123
+scaleSets:
+  - name: macos-runner
+    githubConfigURL: https://github.com/testorg
+    labels: [self-hosted, macOS]
+    vm:
+      image: ghcr.io/cirruslabs/macos-sequoia-xcode:latest
+      diskSize: 200
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.ScaleSets[0].VM.DiskSize; got != 200 {
+		t.Errorf("VM.DiskSize = %d, want 200", got)
+	}
 }
 
 func TestLoad_Defaults(t *testing.T) {

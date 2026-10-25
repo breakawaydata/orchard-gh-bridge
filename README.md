@@ -165,6 +165,10 @@ The bridge tracks VM capacity with a global semaphore shared across all scale se
 - **Static override:** Set `maxVMs` in config to a fixed number to override auto-detection.
 - **Per-scale-set limits:** Set `maxRunners` on individual scale sets to cap them independently of the global limit.
 
+### VM disk size
+
+`vm.diskSize` (GB) grows each VM's disk when it is created; Orchard runs `tart set --disk-size` on the clone before boot. Leave it unset to keep the image's own disk size. Tart can only grow a disk, so a value smaller than the image's disk makes VM creation fail. The disk is sparse on the host, so it only consumes what the guest writes, but size it so one VM per worker still fits the host's free space.
+
 ### Per-host VM sizing (AutoSize)
 
 By default `vm.cpu` and `vm.memory` are fixed per scale set, so every VM in that scale set gets the same allocation regardless of the host it lands on. That wastes capacity on heterogeneous fleets (e.g. one 10-core Mac Mini next to a 12-core MacBook Pro).
