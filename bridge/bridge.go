@@ -290,16 +290,7 @@ func (b *Bridge) createOneVM(ctx context.Context, cpu, memory uint64, labels map
 	}
 
 	script := StartupScript(jitConfig.EncodedJITConfig, b.vmConfig.DockerPort)
-	vm := &orchard.VM{
-		Name:   vmName,
-		Image:  b.vmConfig.Image,
-		CPU:    cpu,
-		Memory: memory,
-		Labels: labels,
-		StartupScript: &orchard.VMScript{
-			ScriptContent: script,
-		},
-	}
+	vm := b.vmSpec(vmName, script, cpu, memory, labels)
 
 	if _, err := b.orchardClient.CreateVM(ctx, vm); err != nil {
 		b.logger.Error("failed to create VM", "vm", vmName, "error", err)
@@ -311,9 +302,27 @@ func (b *Bridge) createOneVM(ctx context.Context, cpu, memory uint64, labels map
 	b.mu.Unlock()
 
 	args := []any{"vm", vmName, "image", b.vmConfig.Image}
+	if vm.DiskSize > 0 {
+		args = append(args, "diskSizeGB", vm.DiskSize)
+	}
 	args = append(args, logExtras...)
 	b.logger.Info("created VM", args...)
 	return nil
+}
+
+// vmSpec builds the Orchard VM resource for one runner VM.
+func (b *Bridge) vmSpec(name, script string, cpu, memory uint64, labels map[string]string) *orchard.VM {
+	return &orchard.VM{
+		Name:     name,
+		Image:    b.vmConfig.Image,
+		CPU:      cpu,
+		Memory:   memory,
+		DiskSize: b.vmConfig.DiskSize,
+		Labels:   labels,
+		StartupScript: &orchard.VMScript{
+			ScriptContent: script,
+		},
+	}
 }
 
 // doCreateOneVM calls createOneVM, or the testCreateOneVM hook when set.

@@ -108,6 +108,7 @@ config:
     #     cpu: 4
     #     memory: 8192
     #     dockerPort: 0        # Connect to host Docker via TCP (auto-detects host IP from gateway)
+    #     diskSize: 0          # Grow each VM's disk to this many GB at creation (0 = keep the image's size)
     #     labels: {}           # Orchard worker-affinity labels for VM placement
     #       # nested-virt: "true"   # Only schedule on workers with this label
     #       # vm-class: "large"     # Route to workers with matching memory class
