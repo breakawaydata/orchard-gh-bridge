@@ -90,9 +90,19 @@ type VMConfig struct {
 	// DiskSize, when set, grows each VM's disk to this many GB at creation.
 	// Unset (0) keeps the image's default disk size. Tart can only grow a
 	// disk, so a value below the image's size makes VM creation fail.
-	DiskSize uint64            `yaml:"diskSize,omitempty"`
-	Labels   map[string]string `yaml:"labels"`
-	AutoSize AutoSizeConfig    `yaml:"autoSize,omitempty"`
+	DiskSize uint64 `yaml:"diskSize,omitempty"`
+	// NetSoftnet runs each VM behind Tart's Softnet isolation: the VM can
+	// reach the internet but not private networks. The worker host stays
+	// reachable through the VM's gateway, which also serves DNS; block it
+	// with NetSoftnetBlock. Every worker needs the softnet binary installed.
+	NetSoftnet bool `yaml:"netSoftnet,omitempty"`
+	// NetSoftnetAllow and NetSoftnetBlock are Softnet rules added on top of
+	// its default policy: CIDRs, or rules such as "out @host" or
+	// "out proto udp @host port 53". Setting either one also enables Softnet.
+	NetSoftnetAllow []string          `yaml:"netSoftnetAllow,omitempty"`
+	NetSoftnetBlock []string          `yaml:"netSoftnetBlock,omitempty"`
+	Labels          map[string]string `yaml:"labels"`
+	AutoSize        AutoSizeConfig    `yaml:"autoSize,omitempty"`
 }
 
 // AutoSizeConfig opts a scale set into per-host VM sizing.

@@ -319,6 +319,10 @@ func (b *Bridge) vmSpec(name, script string, cpu, memory uint64, labels map[stri
 		Memory:   memory,
 		DiskSize: b.vmConfig.DiskSize,
 		Labels:   labels,
+
+		NetSoftnet:      b.vmConfig.NetSoftnet,
+		NetSoftnetAllow: b.vmConfig.NetSoftnetAllow,
+		NetSoftnetBlock: b.vmConfig.NetSoftnetBlock,
 		StartupScript: &orchard.VMScript{
 			ScriptContent: script,
 		},

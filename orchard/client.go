@@ -149,9 +149,12 @@ func toV1VM(vm *VM) v1.VM {
 		Username: "admin",
 		Password: "admin",
 		VMSpec: v1.VMSpec{
-			OS:      v1.OSDarwin,
-			Arch:    v1.ArchitectureARM64,
-			Runtime: v1.RuntimeTart,
+			OS:              v1.OSDarwin,
+			Arch:            v1.ArchitectureARM64,
+			Runtime:         v1.RuntimeTart,
+			NetSoftnet:      vm.NetSoftnet,
+			NetSoftnetAllow: vm.NetSoftnetAllow,
+			NetSoftnetBlock: vm.NetSoftnetBlock,
 		},
 		RestartPolicy: v1.RestartPolicyNever,
 	}
@@ -170,18 +173,21 @@ func toV1VM(vm *VM) v1.VM {
 
 func fromV1VM(vm v1.VM) VM {
 	return VM{
-		Name:          vm.Name,
-		Image:         vm.Image,
-		CPU:           vm.CPU,
-		Memory:        vm.Memory,
-		Nested:        vm.Nested,
-		DiskSize:      vm.DiskSize,
-		Status:        mapV1Status(vm.Status),
-		StatusMessage: vm.StatusMessage,
-		Worker:        vm.Worker,
-		StartupScript: fromV1Script(vm.StartupScript),
-		Labels:        map[string]string(vm.Labels),
-		CreatedAt:     vm.CreatedAt,
+		Name:            vm.Name,
+		Image:           vm.Image,
+		CPU:             vm.CPU,
+		Memory:          vm.Memory,
+		Nested:          vm.Nested,
+		DiskSize:        vm.DiskSize,
+		NetSoftnet:      vm.NetSoftnet || vm.NetSoftnetDeprecated,
+		NetSoftnetAllow: vm.NetSoftnetAllow,
+		NetSoftnetBlock: vm.NetSoftnetBlock,
+		Status:          mapV1Status(vm.Status),
+		StatusMessage:   vm.StatusMessage,
+		Worker:          vm.Worker,
+		StartupScript:   fromV1Script(vm.StartupScript),
+		Labels:          map[string]string(vm.Labels),
+		CreatedAt:       vm.CreatedAt,
 	}
 }
 

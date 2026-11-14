@@ -11,13 +11,18 @@ type VM struct {
 	// DiskSize resizes the VM's disk to this many GB after clone (Orchard
 	// runs `tart set --disk-size`). Zero is omitted, so the image's own disk
 	// size is kept.
-	DiskSize      uint64            `json:"diskSize,omitempty"`
-	Status        string            `json:"status,omitempty"`
-	StatusMessage string            `json:"statusMessage,omitempty"`
-	Worker        string            `json:"worker,omitempty"`
-	StartupScript *VMScript         `json:"startup_script,omitempty"`
-	Labels        map[string]string `json:"labels,omitempty"`
-	CreatedAt     time.Time         `json:"createdAt,omitempty"`
+	DiskSize uint64 `json:"diskSize,omitempty"`
+	// NetSoftnet, NetSoftnetAllow and NetSoftnetBlock map to Orchard's
+	// Softnet fields; Orchard passes them to `tart run --net-softnet*`.
+	NetSoftnet      bool              `json:"netSoftnet,omitempty"`
+	NetSoftnetAllow []string          `json:"netSoftnetAllow,omitempty"`
+	NetSoftnetBlock []string          `json:"netSoftnetBlock,omitempty"`
+	Status          string            `json:"status,omitempty"`
+	StatusMessage   string            `json:"statusMessage,omitempty"`
+	Worker          string            `json:"worker,omitempty"`
+	StartupScript   *VMScript         `json:"startup_script,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	CreatedAt       time.Time         `json:"createdAt,omitempty"`
 }
 
 type VMScript struct {
