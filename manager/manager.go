@@ -525,7 +525,7 @@ func workerCountedFn(autoSize bool, reserveCPU, reserveMemMiB uint64, workers []
 			return brdg.AutoSizeExclusionReason(w, pinCounts, cpu, mem) == ""
 		}
 	}
-	return func(w orchard.Worker) bool { return !w.SchedulingPaused }
+	return brdg.WorkerSchedulable
 }
 
 // workerCapacityFn returns the capacity-counting function for a scale set:
