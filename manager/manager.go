@@ -464,28 +464,16 @@ func (m *Manager) recomputeScaleSetShares(ctx context.Context) {
 		if h.staticMaxRunners > 0 {
 			continue
 		}
-		labels := h.bridge.VMLabels()
 		reserveCPU, reserveMemMiB := h.bridge.AutoSizeReserveConfig()
-		capacityFn := workerCapacityFn(h.bridge.AutoSizeEnabled(), reserveCPU, reserveMemMiB)
-		workerCap := capacityFn(snap.Workers, labels)
-		othersActive := 0
+		var othersVMs []orchard.VM
 		for _, other := range handles {
 			if other == h {
 				continue
 			}
-			for _, vm := range snap.ManagedVMsForScaleSet(other.bridge.ScaleSetName()) {
-				if vm.Status == orchard.VMStatusStopped || vm.Status == orchard.VMStatusFailed {
-					continue
-				}
-				if vmConsumesLabeledWorker(vm, snap.Workers, labels) {
-					othersActive++
-				}
-			}
+			othersVMs = append(othersVMs, snap.ManagedVMsForScaleSet(other.bridge.ScaleSetName())...)
 		}
-		share := workerCap - othersActive
-		if share < 0 {
-			share = 0
-		}
+		share, workerCap, othersActive := scaleSetShare(snap.Workers, othersVMs, h.bridge.VMLabels(),
+			h.bridge.AutoSizeEnabled(), reserveCPU, reserveMemMiB)
 		m.logger.Info("updating maxRunners",
 			"scaleSet", h.bridge.ScaleSetName(),
 			"share", share,
@@ -495,6 +483,49 @@ func (m *Manager) recomputeScaleSetShares(ctx context.Context) {
 		)
 		h.listener.SetMaxRunners(share)
 	}
+}
+
+// scaleSetShare computes one scale set's share of the label-matching workers:
+// workerCap (what workerCapacityFn counts) minus othersActive (the non-terminal
+// VMs of OTHER scale sets, othersVMs, that occupy one of those counted
+// workers), floored at zero.
+//
+// A VM running on a worker that workerCap leaves out — scheduling-paused, or
+// for AutoSize any worker the eligibility predicate excludes — is not
+// subtracted: its machine is already missing from workerCap, so subtracting
+// the VM too would take a second, idle worker out of the share for as long as
+// it drains (BAE-13738).
+func scaleSetShare(workers []orchard.Worker, othersVMs []orchard.VM, labels map[string]string, autoSize bool, reserveCPU, reserveMemMiB uint64) (share, workerCap, othersActive int) {
+	workerCap = workerCapacityFn(autoSize, reserveCPU, reserveMemMiB)(workers, labels)
+	counted := workerCountedFn(autoSize, reserveCPU, reserveMemMiB, workers)
+	for _, vm := range othersVMs {
+		if vm.Status == orchard.VMStatusStopped || vm.Status == orchard.VMStatusFailed {
+			continue
+		}
+		if vmConsumesLabeledWorker(vm, workers, labels, counted) {
+			othersActive++
+		}
+	}
+	share = workerCap - othersActive
+	if share < 0 {
+		share = 0
+	}
+	return share, workerCap, othersActive
+}
+
+// workerCountedFn returns the per-worker predicate behind workerCapacityFn:
+// true when the worker contributes to the scale set's capacity. workers must
+// be the same live set passed to the capacity function, because AutoSize
+// eligibility depends on pin-label uniqueness across it.
+func workerCountedFn(autoSize bool, reserveCPU, reserveMemMiB uint64, workers []orchard.Worker) func(orchard.Worker) bool {
+	if autoSize {
+		cpu, mem := brdg.AutoSizeReserves(reserveCPU, reserveMemMiB)
+		pinCounts := brdg.PinCounts(workers)
+		return func(w orchard.Worker) bool {
+			return brdg.AutoSizeExclusionReason(w, pinCounts, cpu, mem) == ""
+		}
+	}
+	return brdg.WorkerSchedulable
 }
 
 // workerCapacityFn returns the capacity-counting function for a scale set:
@@ -518,18 +549,22 @@ func workerCapacityFn(autoSize bool, reserveCPU, reserveMemMiB uint64) func([]or
 // A VM whose assigned worker is no longer live is matched like a pending one,
 // by its own labels.
 //
+// A scheduled VM on a live worker for which counted returns false is not
+// counted: that worker is outside the capacity the VM would be subtracted
+// from. Pending VMs are still matched against every label-matching worker.
+//
 // Both branches are independent of the worker's Orchard Name versus its pin
 // identity: a scheduled VM's Worker field is an Orchard Name and is resolved
 // against worker Names, and a pending AutoSize VM carries PinLabelKey set to
 // the target's pin identity, which is matched against worker labels the same
 // way Orchard's scheduler matches it.
-func vmConsumesLabeledWorker(vm orchard.VM, workers []orchard.Worker, vmLabels map[string]string) bool {
+func vmConsumesLabeledWorker(vm orchard.VM, workers []orchard.Worker, vmLabels map[string]string, counted func(orchard.Worker) bool) bool {
 	if vm.Worker != "" {
 		for _, w := range workers {
 			if w.Name != vm.Worker {
 				continue
 			}
-			return workerMatchesAllLabels(w, vmLabels)
+			return workerMatchesAllLabels(w, vmLabels) && counted(w)
 		}
 		// Its worker is no longer live. After a rename the same machine may
 		// still be running it under a new Name with the same labels, so fall

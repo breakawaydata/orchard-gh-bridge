@@ -162,7 +162,7 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 			return currentActive, nil
 		}
 		workerCap := CapacityForLabels(snap.Workers, b.vmConfig.Labels)
-		managedMatching := countActiveVMs(snap.ManagedVMsMatchingLabels(b.vmConfig.Labels))
+		managedMatching := countActiveVMs(snap.ManagedVMsOnSchedulableWorkers(b.vmConfig.Labels))
 		free := workerCap - managedMatching
 		if free <= 0 {
 			b.logger.Info("no free worker slots for labels",
@@ -186,7 +186,7 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 
 	created := 0
 	for range acquired {
-		err := b.createOneVM(ctx, b.vmConfig.CPU, b.vmConfig.Memory, b.vmConfig.Labels, nil)
+		err := b.doCreateOneVM(ctx, b.vmConfig.CPU, b.vmConfig.Memory, b.vmConfig.Labels, nil)
 		if err != nil {
 			b.capacity.Release(acquired - created)
 			b.notifyChange()

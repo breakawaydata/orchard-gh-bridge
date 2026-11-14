@@ -206,9 +206,14 @@ func (c *Cleanup) sweep(ctx context.Context) {
 	// workers is already the live set, so a VM pinned to a name that is not in
 	// it is stranded on a machine that has gone away.
 	liveWorkers := make(map[string]struct{}, len(workers))
+	pausedWorkers := make(map[string]struct{})
 	for _, w := range workers {
 		liveWorkers[w.Name] = struct{}{}
+		if !WorkerSchedulable(w) {
+			pausedWorkers[w.Name] = struct{}{}
+		}
 	}
+	var onPaused int
 
 	for _, vm := range vms {
 		if !IsManagedVM(vm.Name) {
@@ -230,6 +235,14 @@ func (c *Cleanup) sweep(ctx context.Context) {
 		if vm.Worker != "" {
 			if _, ok := liveWorkers[vm.Worker]; !ok {
 				orphaned++
+				continue
+			}
+			// The same holds for a VM draining on a scheduling-paused worker:
+			// pushMaxCapacity leaves that worker's slots out of max, so
+			// counting the VM as in use would block an idle worker until the
+			// drain finished (BAE-13738).
+			if _, ok := pausedWorkers[vm.Worker]; ok {
+				onPaused++
 				continue
 			}
 		}
@@ -259,6 +272,11 @@ func (c *Cleanup) sweep(ctx context.Context) {
 		// here means a machine left the fleet without its VMs being cleaned up.
 		c.logger.Info("managed VMs stranded on workers that are no longer live",
 			"count", orphaned)
+	}
+
+	if onPaused > 0 {
+		c.logger.Debug("managed VMs draining on scheduling-paused workers, not counted as in use",
+			"count", onPaused)
 	}
 
 	if deleted > 0 {
@@ -468,7 +486,7 @@ const resourceTartVMs = "org.cirruslabs.tart-vms"
 func (c *Cleanup) pushMaxCapacity(workers []orchard.Worker) {
 	var total int
 	for _, w := range workers {
-		if w.SchedulingPaused {
+		if !WorkerSchedulable(w) {
 			continue
 		}
 		if n, ok := w.Resources[resourceTartVMs]; ok {
@@ -485,7 +503,7 @@ func (c *Cleanup) pushMaxCapacity(workers []orchard.Worker) {
 func CapacityForLabels(workers []orchard.Worker, vmLabels map[string]string) int {
 	var total int
 	for _, w := range workers {
-		if w.SchedulingPaused {
+		if !WorkerSchedulable(w) {
 			continue
 		}
 		if !workerMatchesLabels(w, vmLabels) {
@@ -496,6 +514,14 @@ func CapacityForLabels(workers []orchard.Worker, vmLabels map[string]string) int
 		}
 	}
 	return total
+}
+
+// WorkerSchedulable reports whether w counts toward fixed-slot capacity:
+// Orchard refuses to place new VMs on a scheduling-paused worker. It is the one
+// predicate shared by CapacityForLabels, the share calculation and the in-use
+// count, so capacity and usage always leave out the same workers (BAE-13738).
+func WorkerSchedulable(w orchard.Worker) bool {
+	return !w.SchedulingPaused
 }
 
 func workerMatchesLabels(w orchard.Worker, vmLabels map[string]string) bool {

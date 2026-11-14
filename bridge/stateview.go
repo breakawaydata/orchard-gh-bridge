@@ -209,6 +209,25 @@ func (s *Snapshot) ManagedVMsMatchingLabels(vmLabels map[string]string) []orchar
 	return out
 }
 
+// ManagedVMsOnSchedulableWorkers is ManagedVMsMatchingLabels minus the VMs
+// running on a scheduling-paused worker. Such a VM is draining on a machine
+// CapacityForLabels already leaves out, so counting it against that capacity
+// would take a second, idle worker out of play (BAE-13738). Pending VMs and
+// VMs whose worker is not in the live set are unchanged.
+func (s *Snapshot) ManagedVMsOnSchedulableWorkers(vmLabels map[string]string) []orchard.VM {
+	matching := s.ManagedVMsMatchingLabels(vmLabels)
+	out := make([]orchard.VM, 0, len(matching))
+	for _, vm := range matching {
+		if vm.Worker != "" {
+			if w, ok := s.workersByName[vm.Worker]; ok && !WorkerSchedulable(*w) {
+				continue
+			}
+		}
+		out = append(out, vm)
+	}
+	return out
+}
+
 func labelsSuperset(have, want map[string]string) bool {
 	for k, v := range want {
 		if have[k] != v {

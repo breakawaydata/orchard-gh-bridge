@@ -264,6 +264,77 @@ func TestHandleDesired_BlocksWhenOnlyMatchingWorkerPaused(t *testing.T) {
 	}
 }
 
+// TestHandleDesired_PausedWorkerVMDoesNotBlockIdleWorker: two one-slot
+// label-matching workers, one scheduling-paused and still draining a managed
+// VM, one idle. The paused worker is already out of the capacity (1, not 2), so
+// its draining VM must not be subtracted from it too, or the idle worker would
+// get no runner until the drain finished (BAE-13738).
+func TestHandleDesired_PausedWorkerVMDoesNotBlockIdleWorker(t *testing.T) {
+	labels := map[string]string{"arch": "arm"}
+	mock := newMockOrchard()
+	mock.workers = []orchard.Worker{
+		{Name: "paused", Resources: map[string]uint64{resourceTartVMs: 1}, Labels: labels, SchedulingPaused: true},
+		{Name: "idle", Resources: map[string]uint64{resourceTartVMs: 1}, Labels: labels},
+	}
+	// Another scale set's VM is draining on the paused worker.
+	mock.vms["gha-orchard-other-aaaaaaaa"] = &orchard.VM{
+		Name: "gha-orchard-other-aaaaaaaa", Worker: "paused", Status: orchard.VMStatusRunning,
+	}
+
+	cap := NewCapacity(10)
+	b := New(Config{
+		ScaleSetName:  "test",
+		VMConfig:      config.VMConfig{Labels: labels},
+		OrchardClient: mock,
+		Capacity:      cap,
+		State:         NewStateView(mock, time.Minute, DefaultWorkerStaleAfter),
+		Logger:        testLogger(),
+	})
+	var created int
+	b.testCreateOneVM = func(_ context.Context, _, _ uint64, _ map[string]string, _ []any) error {
+		created++
+		return nil
+	}
+
+	if _, err := b.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatalf("HandleDesiredRunnerCount: %v", err)
+	}
+	if created != 1 {
+		t.Errorf("VMs created = %d, want 1 (the idle worker's slot; the paused worker is not capacity)", created)
+	}
+}
+
+// TestHandleDesired_VMOnLiveWorkerStillCounts guards the other side of the
+// paused-worker exclusion: a VM on a schedulable worker keeps using its slot.
+func TestHandleDesired_VMOnLiveWorkerStillCounts(t *testing.T) {
+	labels := map[string]string{"arch": "arm"}
+	mock := newMockOrchard()
+	mock.workers = []orchard.Worker{
+		{Name: "paused", Resources: map[string]uint64{resourceTartVMs: 1}, Labels: labels, SchedulingPaused: true},
+		{Name: "busy", Resources: map[string]uint64{resourceTartVMs: 1}, Labels: labels},
+	}
+	mock.vms["gha-orchard-other-bbbbbbbb"] = &orchard.VM{
+		Name: "gha-orchard-other-bbbbbbbb", Worker: "busy", Status: orchard.VMStatusRunning,
+	}
+
+	b := New(Config{
+		ScaleSetName:  "test",
+		VMConfig:      config.VMConfig{Labels: labels},
+		OrchardClient: mock,
+		Capacity:      NewCapacity(10),
+		State:         NewStateView(mock, time.Minute, DefaultWorkerStaleAfter),
+		Logger:        testLogger(),
+	})
+	b.testCreateOneVM = func(_ context.Context, _, _ uint64, _ map[string]string, _ []any) error {
+		t.Error("created a VM although the only schedulable worker is full")
+		return nil
+	}
+
+	if _, err := b.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatalf("HandleDesiredRunnerCount: %v", err)
+	}
+}
+
 func TestHandleDesired_RespectsLabelsForCapacity(t *testing.T) {
 	mock := newMockOrchard()
 	mock.workers = []orchard.Worker{
