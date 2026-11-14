@@ -44,18 +44,18 @@ func TestVMConsumesLabeledWorker_RenamedWorker(t *testing.T) {
 		Status: orchard.VMStatusRunning,
 		Labels: map[string]string{"vm-class-large": "true", brdg.PinLabelKey: "BreakAwySFMini1.localdomain"},
 	}
-	if !vmConsumesLabeledWorker(scheduled, workers, large) {
+	if !vmConsumesLabeledWorker(scheduled, workers, large, countAll) {
 		t.Error("scheduled VM on the renamed worker not counted against the large pool")
 	}
 
 	pending := scheduled
 	pending.Worker = ""
 	pending.Status = orchard.VMStatusCreating
-	if !vmConsumesLabeledWorker(pending, workers, large) {
+	if !vmConsumesLabeledWorker(pending, workers, large, countAll) {
 		t.Error("pending VM pinned by label to the renamed worker not counted against the large pool")
 	}
 
-	if vmConsumesLabeledWorker(pending, workers, map[string]string{"vm-class-small": "true"}) {
+	if vmConsumesLabeledWorker(pending, workers, map[string]string{"vm-class-small": "true"}, countAll) {
 		t.Error("pending large VM counted against an unrelated pool")
 	}
 
@@ -63,7 +63,7 @@ func TestVMConsumesLabeledWorker_RenamedWorker(t *testing.T) {
 	// holds the renamed machine's slot, as freeAutoSizeWorkers assumes.
 	onOldName := scheduled
 	onOldName.Worker = "BreakAwySFMini1.localdomain"
-	if !vmConsumesLabeledWorker(onOldName, workers, large) {
+	if !vmConsumesLabeledWorker(onOldName, workers, large, countAll) {
 		t.Error("VM on the pre-rename Name not counted against the large pool")
 	}
 }

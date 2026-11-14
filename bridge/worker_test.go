@@ -171,6 +171,54 @@ func TestCleanup_StrandedVMDoesNotBlockHealthyWorker(t *testing.T) {
 	}
 }
 
+// TestCleanup_VMOnPausedWorkerDoesNotBlockIdleWorker is the global-semaphore
+// half of BAE-13738. pushMaxCapacity drops a scheduling-paused worker's slots
+// from max, so a VM still draining on it must drop out of current too, or the
+// idle worker next to it logs "global capacity exhausted" with nothing of its
+// own running.
+func TestCleanup_VMOnPausedWorkerDoesNotBlockIdleWorker(t *testing.T) {
+	now := time.Now()
+	mock := newMockOrchard()
+	mock.workers = []orchard.Worker{
+		{Name: "idle-worker", LastSeen: now, Resources: map[string]uint64{resourceTartVMs: 1}},
+		{Name: "paused-worker", LastSeen: now, Resources: map[string]uint64{resourceTartVMs: 1}, SchedulingPaused: true},
+	}
+	mock.vms["gha-orchard-test-draining"] = &orchard.VM{
+		Name:      "gha-orchard-test-draining",
+		Status:    orchard.VMStatusRunning,
+		Worker:    "paused-worker",
+		CreatedAt: now,
+	}
+	// A pending VM has no worker yet and still holds a slot.
+	mock.vms["gha-orchard-test-pending"] = &orchard.VM{
+		Name:      "gha-orchard-test-pending",
+		Status:    orchard.VMStatusCreating,
+		CreatedAt: now,
+	}
+
+	cap := NewCapacity(0)
+	cleanup := NewCleanup(mock, cap, nil, testLogger())
+	cleanup.SetStateView(NewStateView(mock, time.Minute, DefaultWorkerStaleAfter))
+	cleanup.sweep(context.Background())
+
+	if got := cap.Max(); got != 1 {
+		t.Fatalf("Max = %d, want 1 (only the idle worker's slot)", got)
+	}
+	if got := cap.InUse(); got != 1 {
+		t.Errorf("InUse = %d, want 1 (the pending VM only; the draining VM's worker is excluded from Max)", got)
+	}
+
+	delete(mock.vms, "gha-orchard-test-pending")
+	cleanup.SetStateView(NewStateView(mock, time.Minute, DefaultWorkerStaleAfter))
+	cleanup.sweep(context.Background())
+	if got := cap.Available(); got != 1 {
+		t.Errorf("Available = %d, want 1; the idle worker must be able to take a job while the paused one drains", got)
+	}
+	if _, err := mock.GetVM(context.Background(), "gha-orchard-test-draining"); err != nil {
+		t.Errorf("draining VM must be left to finish: %v", err)
+	}
+}
+
 // The mirror case: a VM on a live worker still occupies a slot.
 func TestCleanup_VMOnLiveWorkerStillCounts(t *testing.T) {
 	now := time.Now()
