@@ -115,6 +115,37 @@ func TestCreateVM_OmitsDiskSizeWhenUnset(t *testing.T) {
 	}
 }
 
+func TestCreateVM_SendsSoftnet(t *testing.T) {
+	body := createVMBody(t, &VM{
+		Name:            "test-vm",
+		Image:           "test-image",
+		CPU:             4,
+		NetSoftnet:      true,
+		NetSoftnetAllow: []string{"10.0.0.0/8"},
+		NetSoftnetBlock: []string{"0.0.0.0/0"},
+	})
+	var sent v1.VM
+	if err := json.Unmarshal([]byte(body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if !sent.NetSoftnet {
+		t.Errorf("sent netSoftnet = false, want true (body: %s)", body)
+	}
+	if len(sent.NetSoftnetAllow) != 1 || sent.NetSoftnetAllow[0] != "10.0.0.0/8" {
+		t.Errorf("sent netSoftnetAllow = %v (body: %s)", sent.NetSoftnetAllow, body)
+	}
+	if len(sent.NetSoftnetBlock) != 1 || sent.NetSoftnetBlock[0] != "0.0.0.0/0" {
+		t.Errorf("sent netSoftnetBlock = %v (body: %s)", sent.NetSoftnetBlock, body)
+	}
+}
+
+func TestCreateVM_OmitsSoftnetWhenUnset(t *testing.T) {
+	body := createVMBody(t, &VM{Name: "test-vm", Image: "test-image", CPU: 4})
+	if strings.Contains(body, "etSoftnet") || strings.Contains(body, "net-softnet") {
+		t.Errorf("softnet fields must be absent when unset: %s", body)
+	}
+}
+
 func TestGetVM(t *testing.T) {
 	c := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/vms/my-vm" {

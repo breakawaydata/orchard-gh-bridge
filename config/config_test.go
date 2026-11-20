@@ -90,6 +90,43 @@ scaleSets:
 	}
 }
 
+func TestLoad_Softnet(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+orchard:
+  address: http://localhost:6120
+github:
+  token: ghp_test123
+scaleSets:
+  - name: macos-runner
+    githubConfigURL: https://github.com/testorg
+    labels: [self-hosted, macOS]
+    vm:
+      image: ghcr.io/cirruslabs/macos-sequoia-xcode:latest
+      netSoftnet: true
+      netSoftnetAllow: [10.0.0.0/8]
+      netSoftnetBlock: [0.0.0.0/0]
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	vm := cfg.ScaleSets[0].VM
+	if !vm.NetSoftnet {
+		t.Error("VM.NetSoftnet = false, want true")
+	}
+	if len(vm.NetSoftnetAllow) != 1 || vm.NetSoftnetAllow[0] != "10.0.0.0/8" {
+		t.Errorf("VM.NetSoftnetAllow = %v", vm.NetSoftnetAllow)
+	}
+	if len(vm.NetSoftnetBlock) != 1 || vm.NetSoftnetBlock[0] != "0.0.0.0/0" {
+		t.Errorf("VM.NetSoftnetBlock = %v", vm.NetSoftnetBlock)
+	}
+}
+
 func TestLoad_Defaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
