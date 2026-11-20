@@ -126,7 +126,7 @@ func TestWorkerCountForLabels_StaleDuplicateDoesNotBlockLiveWorker(t *testing.T)
 	if got := WorkerCountForLabels(live, nil, 4, 4096); got != 1 {
 		t.Fatalf("WorkerCountForLabels(live) = %d, want 1", got)
 	}
-	free := freeAutoSizeSlots(live, nil, nil, 4, 4096)
+	free := freeAutoSizeSlots(live, nil, nil, 4, 4096, 0)
 	if len(free) != 1 || free[0].Name != "BreakAway-SF-Mac-Mini-1.local" {
 		t.Errorf("freeAutoSizeSlots = %+v, want the live renamed worker", free)
 	}
@@ -145,7 +145,7 @@ func TestFreeAutoSizeSlots_ScheduledVMMapsBackToPinIdentity(t *testing.T) {
 		Status: orchard.VMStatusRunning,
 		Labels: map[string]string{PinLabelKey: "BreakAwySFMini1.localdomain"},
 	}}
-	free := freeAutoSizeSlots(workers, vms, nil, 4, 4096)
+	free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0)
 	if len(free) != 1 || free[0].Name != "b" {
 		t.Errorf("freeAutoSizeSlots = %+v, want only [b]", free)
 	}
@@ -164,7 +164,7 @@ func TestFreeAutoSizeSlots_PendingVMMatchedByPinLabel(t *testing.T) {
 		Status: orchard.VMStatusCreating,
 		Labels: map[string]string{PinLabelKey: "BreakAwySFMini1.localdomain"},
 	}}
-	free := freeAutoSizeSlots(workers, vms, nil, 4, 4096)
+	free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0)
 	if len(free) != 1 || free[0].Name != "b" {
 		t.Errorf("freeAutoSizeSlots = %+v, want only [b]", free)
 	}
@@ -187,13 +187,13 @@ func TestFreeAutoSizeSlots_VMOnRenamedWorkersOldNameStillBlocks(t *testing.T) {
 		Status: orchard.VMStatusRunning,
 		Labels: map[string]string{PinLabelKey: "BreakAwySFMini1.localdomain"},
 	}}
-	if free := freeAutoSizeSlots(workers, vms, nil, 4, 4096); len(free) != 0 {
+	if free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0); len(free) != 0 {
 		t.Errorf("freeAutoSizeSlots = %+v, want none (VM under the old Name still holds the pin identity)", free)
 	}
 
 	// Once that VM is gone the renamed worker is free again.
 	vms[0].Status = orchard.VMStatusStopped
-	if free := freeAutoSizeSlots(workers, vms, nil, 4, 4096); len(free) != 1 {
+	if free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0); len(free) != 1 {
 		t.Errorf("freeAutoSizeSlots = %+v, want the renamed worker once the VM stopped", free)
 	}
 }
@@ -278,7 +278,7 @@ func TestFreeAutoSizeSlots_ExcludesAssigned(t *testing.T) {
 		{Name: "manual", Worker: "c", Status: orchard.VMStatusRunning},
 	}
 
-	free := freeAutoSizeSlots(workers, vms, nil, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB)
+	free := freeAutoSizeSlots(workers, vms, nil, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB, 0)
 	gotNames := make([]string, len(free))
 	for i, w := range free {
 		gotNames[i] = w.Name
@@ -301,7 +301,7 @@ func TestFreeAutoSizeSlots_ExcludesPendingPinned(t *testing.T) {
 			Labels: map[string]string{PinLabelKey: "a"},
 		},
 	}
-	free := freeAutoSizeSlots(workers, vms, nil, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB)
+	free := freeAutoSizeSlots(workers, vms, nil, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB, 0)
 	if len(free) != 1 || free[0].Name != "b" {
 		t.Errorf("freeAutoSizeSlots = %+v, want only [b]", free)
 	}
@@ -801,7 +801,7 @@ func TestFreeAutoSizeSlots(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := workerNames(freeAutoSizeSlots(tc.workers, tc.vms, nil, 4, 4096))
+			got := workerNames(freeAutoSizeSlots(tc.workers, tc.vms, nil, 4, 4096, 0))
 			if !equalStrings(got, tc.want) {
 				t.Errorf("freeAutoSizeSlots = %v, want %v", got, tc.want)
 			}
@@ -824,9 +824,131 @@ func TestManagedPinCounts(t *testing.T) {
 		{Name: "manual", Worker: "b", Status: orchard.VMStatusRunning},            // unmanaged
 		managedVM("99999999", "", orchard.VMStatusCreating, ""),                   // pending, no pin
 	}
-	got := managedPinCounts(vms, workers)
-	if len(got) != 2 || got["pin-a"] != 3 || got["b"] != 1 {
-		t.Errorf("managedPinCounts = %v, want map[b:1 pin-a:3]", got)
+	got := managedPinUsage(vms, workers)
+	if len(got) != 2 || got["pin-a"].count != 3 || got["b"].count != 1 {
+		t.Errorf("managedPinUsage = %v, want counts map[b:1 pin-a:3]", got)
+	}
+	if got["pin-a"].unsized != 3 {
+		t.Errorf("pin-a unsized = %d, want 3 (the VMs report no size)", got["pin-a"].unsized)
+	}
+}
+
+func TestManagedPinUsage_SumsSizes(t *testing.T) {
+	workers := []orchard.Worker{mkWorker("w", 18, 65536, 2, nil)}
+	vms := []orchard.VM{
+		sizedVM(managedVM("aaaaaaaa", "w", orchard.VMStatusRunning, "w"), 14, 61440),
+		sizedVM(managedVM("bbbbbbbb", "", orchard.VMStatusCreating, "w"), 7, 30720),
+		managedVM("cccccccc", "w", orchard.VMStatusRunning, "w"), // no size
+	}
+	got := managedPinUsage(vms, workers)["w"]
+	want := pinUsage{count: 3, unsized: 1, cpu: 21, memMiB: 92160}
+	if got != want {
+		t.Errorf("managedPinUsage[w] = %+v, want %+v", got, want)
+	}
+}
+
+// sizedVM sets the CPU and memory (MiB) Orchard reports for a VM.
+func sizedVM(vm orchard.VM, cpu, memMiB uint64) orchard.VM {
+	vm.CPU = cpu
+	vm.Memory = memMiB
+	return vm
+}
+
+// An upgrade can leave a VM that an older bridge created at the full host size
+// (18 cores / 64 GiB minus reserves 4 / 4096 -> 14 CPU / 61440 MiB) running on a
+// worker that now advertises two slots. Its count says one slot is free, but
+// the host has nothing left for a 7 CPU / 30720 MiB share.
+func TestFreeAutoSizeSlots_OversizedExistingVMHoldsTheWholeHost(t *testing.T) {
+	workers := []orchard.Worker{slotWorker("w", 18, 65536, 2)}
+	vms := []orchard.VM{sizedVM(managedVM("aaaaaaaa", "w", orchard.VMStatusRunning, "w"), 14, 61440)}
+	if free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0); len(free) != 0 {
+		t.Errorf("freeAutoSizeSlots = %v, want none (the existing VM already takes the whole host)", workerNames(free))
+	}
+}
+
+func TestFreeAutoSizeSlots_SharedSizeExistingVMLeavesTheSecondSlot(t *testing.T) {
+	workers := []orchard.Worker{slotWorker("w", 18, 65536, 2)}
+	vms := []orchard.VM{sizedVM(managedVM("aaaaaaaa", "w", orchard.VMStatusRunning, "w"), 7, 30720)}
+	if got := workerNames(freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0)); !equalStrings(got, []string{"w"}) {
+		t.Errorf("freeAutoSizeSlots = %v, want [w] (one 7 CPU / 30720 MiB share still fits)", got)
+	}
+}
+
+func TestFreeAutoSizeSlots_ResourceFit(t *testing.T) {
+	tests := []struct {
+		name string
+		vms  []orchard.VM
+		want int
+	}{
+		{
+			name: "memory alone is exhausted",
+			vms:  []orchard.VM{sizedVM(managedVM("aaaaaaaa", "w", orchard.VMStatusRunning, "w"), 2, 61440)},
+			want: 0,
+		},
+		{
+			name: "cpu alone is exhausted",
+			vms:  []orchard.VM{sizedVM(managedVM("aaaaaaaa", "w", orchard.VMStatusRunning, "w"), 14, 1024)},
+			want: 0,
+		},
+		{
+			name: "a pending oversized VM counts like a scheduled one",
+			vms:  []orchard.VM{sizedVM(managedVM("aaaaaaaa", "", orchard.VMStatusCreating, "w"), 14, 61440)},
+			want: 0,
+		},
+		{
+			name: "an unsized VM is charged one share, not the whole host",
+			vms:  []orchard.VM{managedVM("aaaaaaaa", "w", orchard.VMStatusRunning, "w")},
+			want: 1,
+		},
+		{
+			name: "a stopped oversized VM no longer holds the host",
+			vms:  []orchard.VM{sizedVM(managedVM("aaaaaaaa", "w", orchard.VMStatusStopped, "w"), 14, 61440)},
+			want: 2,
+		},
+		{
+			name: "small existing VM leaves room for fewer than the count allows",
+			vms:  []orchard.VM{sizedVM(managedVM("aaaaaaaa", "w", orchard.VMStatusRunning, "w"), 8, 1024)},
+			want: 0, // 6 CPU left, under the 7 CPU share
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			workers := []orchard.Worker{slotWorker("w", 18, 65536, 2)}
+			if got := len(freeAutoSizeSlots(workers, tc.vms, nil, 4, 4096, 0)); got != tc.want {
+				t.Errorf("free slots = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFreeAutoSizeSlots_SingleSlotIgnoresSizes(t *testing.T) {
+	workers := []orchard.Worker{slotWorker("w", 18, 65536, 1)}
+	if got := len(freeAutoSizeSlots(workers, nil, nil, 4, 4096, 0)); got != 1 {
+		t.Errorf("empty single-slot worker: free slots = %d, want 1", got)
+	}
+	vms := []orchard.VM{sizedVM(managedVM("aaaaaaaa", "w", orchard.VMStatusRunning, "w"), 1, 512)}
+	if got := len(freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0)); got != 0 {
+		t.Errorf("single-slot worker with a tiny VM: free slots = %d, want 0", got)
+	}
+}
+
+// The slot list is rotated by whole workers before it is expanded, so the round
+// boundaries hold at every cursor: a's second slot never precedes b's first.
+func TestFreeAutoSizeSlots_CursorRotatesWorkersBeforeExpandingSlots(t *testing.T) {
+	workers := []orchard.Worker{slotWorker("a", 18, 65536, 2), slotWorker("b", 10, 16384, 1)}
+	tests := []struct {
+		cursor uint64
+		want   []string
+	}{
+		{0, []string{"a", "b", "a"}},
+		{1, []string{"b", "a", "a"}},
+		{2, []string{"a", "b", "a"}},
+		{3, []string{"b", "a", "a"}},
+	}
+	for _, tc := range tests {
+		if got := workerNames(freeAutoSizeSlots(workers, nil, nil, 4, 4096, tc.cursor)); !equalStrings(got, tc.want) {
+			t.Errorf("cursor %d: freeAutoSizeSlots = %v, want %v", tc.cursor, got, tc.want)
+		}
 	}
 }
 

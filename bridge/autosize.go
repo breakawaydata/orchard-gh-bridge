@@ -189,25 +189,38 @@ func SlotCountForLabels(workers []orchard.Worker, vmLabels map[string]string, re
 
 // freeAutoSizeSlots returns one entry per free VM slot on the AutoSize-eligible
 // workers that match vmLabels and satisfy the given reserves. A worker's free
-// slots are its AutoSizeSlots minus the non-terminal managed VMs assigned (or
-// pending-pinned) to its pin identity; a count at or above the slot total, such
-// as after the slot count was lowered, just means the worker is full.
+// slots are the smaller of two numbers:
+//
+//   - its AutoSizeSlots minus the non-terminal managed VMs assigned (or
+//     pending-pinned) to its pin identity; a count at or above the slot total,
+//     such as after the slot count was lowered, just means the worker is full;
+//   - how many per-slot shares (see autoSizeShare) still fit in the host's CPU
+//     and memory after the reserves and the managed VMs already there, at the
+//     size those VMs actually have. This matters across an upgrade: a VM a
+//     previous bridge version created at the full host size still runs and
+//     would otherwise leave a second slot that the host cannot back. A VM that
+//     reports no size is charged one share, which makes this number agree with
+//     the count above. Single-slot workers skip it, so they behave as ever.
 //
 // The result is round-major so placement spreads across the fleet: every
-// worker's first free slot in input order, then every worker's second, and so
-// on. For a fleet of single-slot workers that is the free workers in input
-// order, deterministic for tests.
-func freeAutoSizeSlots(workers []orchard.Worker, vms []orchard.VM, vmLabels map[string]string, reserveCPU, reserveMemMiB uint64) []orchard.Worker {
-	inUse := managedPinCounts(vms, workers)
+// worker's first free slot, then every worker's second, and so on. For a fleet
+// of single-slot workers that is the free workers in order, deterministic for
+// tests. The eligible workers are rotated by cursor before the slots are
+// expanded, so the round boundaries survive the rotation: consecutive batches
+// walk the workers cyclically and no worker's second slot is offered ahead of
+// another worker's first. A cursor of 0 keeps input order.
+func freeAutoSizeSlots(workers []orchard.Worker, vms []orchard.VM, vmLabels map[string]string, reserveCPU, reserveMemMiB, cursor uint64) []orchard.Worker {
+	inUse := managedPinUsage(vms, workers)
 	candidates := autoSizeCandidates(workers, vmLabels, reserveCPU, reserveMemMiB)
+	if len(candidates) > 1 {
+		offset := int(cursor % uint64(len(candidates)))
+		candidates = append(candidates[offset:len(candidates):len(candidates)], candidates[:offset]...)
+	}
 	free := make([]int, len(candidates))
 	rounds := 0
 	total := 0
 	for i, w := range candidates {
-		n := int(AutoSizeSlots(w)) - inUse[PinIdentity(w)]
-		if n < 0 {
-			n = 0
-		}
+		n := freeSlotsOnWorker(w, inUse[PinIdentity(w)], reserveCPU, reserveMemMiB)
 		free[i] = n
 		total += n
 		if n > rounds {
@@ -225,8 +238,48 @@ func freeAutoSizeSlots(workers []orchard.Worker, vms []orchard.VM, vmLabels map[
 	return out
 }
 
-// managedPinCounts returns, per pin identity, how many non-terminal managed VMs
-// currently occupy a slot on that worker or are about to.
+// pinUsage is what the non-terminal managed VMs on one pin identity hold:
+// their number, and the CPU and memory (MiB) of those that report a size.
+// unsized counts the VMs that do not, which are included in count.
+type pinUsage struct {
+	count   int
+	unsized int
+	cpu     uint64
+	memMiB  uint64
+}
+
+// freeSlotsOnWorker returns how many more VMs worker w can take given the
+// managed VMs already on it (see freeAutoSizeSlots for the two limits). w must
+// have passed AutoSizeExclusionReason with the same reserves.
+func freeSlotsOnWorker(w orchard.Worker, used pinUsage, reserveCPU, reserveMemMiB uint64) int {
+	slots := int(AutoSizeSlots(w))
+	n := slots - used.count
+	if n <= 0 {
+		return 0
+	}
+	if slots == 1 {
+		return n
+	}
+	shareCPU, shareMem, err := autoSizeShare(w, reserveCPU, reserveMemMiB)
+	if err != nil || shareCPU == 0 || shareMem == 0 {
+		return n
+	}
+	usedCPU := used.cpu + uint64(used.unsized)*shareCPU
+	usedMem := used.memMiB + uint64(used.unsized)*shareMem
+	availCPU := w.Resources[resourceLogicalCores] - reserveCPU
+	availMem := w.Resources[resourceMemoryMiB] - reserveMemMiB
+	if usedCPU >= availCPU || usedMem >= availMem {
+		return 0
+	}
+	fit := min((availCPU-usedCPU)/shareCPU, (availMem-usedMem)/shareMem)
+	if uint64(n) > fit {
+		n = int(fit)
+	}
+	return n
+}
+
+// managedPinUsage returns, per pin identity, the non-terminal managed VMs
+// currently occupying a slot on that worker or about to, with their sizes.
 //
 // A scheduled VM reports the Orchard Name of the worker it landed on, so it is
 // mapped back through workers to that worker's pin identity; comparing the
@@ -245,12 +298,23 @@ func freeAutoSizeSlots(workers []orchard.Worker, vms []orchard.VM, vmLabels map[
 // before its freshly-created VM has been scheduled.
 //
 // Unmanaged VMs and VMs that are Stopped or Failed are not counted.
-func managedPinCounts(vms []orchard.VM, workers []orchard.Worker) map[string]int {
+func managedPinUsage(vms []orchard.VM, workers []orchard.Worker) map[string]pinUsage {
 	pinByName := make(map[string]string, len(workers))
 	for _, w := range workers {
 		pinByName[w.Name] = PinIdentity(w)
 	}
-	out := make(map[string]int, len(vms))
+	out := make(map[string]pinUsage, len(vms))
+	add := func(pin string, vm orchard.VM) {
+		u := out[pin]
+		u.count++
+		if vm.CPU == 0 || vm.Memory == 0 {
+			u.unsized++
+		} else {
+			u.cpu += vm.CPU
+			u.memMiB += vm.Memory
+		}
+		out[pin] = u
+	}
 	for _, vm := range vms {
 		if !IsManagedVM(vm.Name) {
 			continue
@@ -261,13 +325,13 @@ func managedPinCounts(vms []orchard.VM, workers []orchard.Worker) map[string]int
 		if vm.Worker != "" {
 			if pin, known := pinByName[vm.Worker]; known {
 				if pin != "" {
-					out[pin]++
+					add(pin, vm)
 				}
 				continue
 			}
 		}
 		if target := vm.Labels[PinLabelKey]; target != "" {
-			out[target]++
+			add(target, vm)
 		}
 	}
 	return out

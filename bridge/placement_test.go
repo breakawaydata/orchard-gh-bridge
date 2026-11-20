@@ -117,3 +117,44 @@ func TestAutoSizePlacement_TwoSlotWorkerTakesTwoVMs(t *testing.T) {
 		t.Errorf("created %d VMs in total, want 2 (both slots already taken)", len(placed))
 	}
 }
+
+// TestAutoSizePlacement_SecondSlotWaitsForOtherWorkersAcrossBatches: with an
+// idle two-slot worker a and an idle one-slot worker b, every two-VM batch must
+// use b before it doubles up on a. The slot list is [a, b, a]; rotating that
+// list by the placement cursor after it was expanded made the second batch pick
+// [a, a] and left b idle, so the rotation has to happen over workers.
+func TestAutoSizePlacement_SecondSlotWaitsForOtherWorkersAcrossBatches(t *testing.T) {
+	mock := newMockOrchard()
+	now := time.Now()
+	a := slotWorker("a", 18, 65536, 2)
+	a.LastSeen = now
+	bw := slotWorker("b", 10, 16384, 1)
+	bw.LastSeen = now
+	mock.workers = []orchard.Worker{a, bw}
+
+	b := New(Config{
+		ScaleSetName:  "test",
+		VMConfig:      config.VMConfig{AutoSize: config.AutoSizeConfig{Enabled: true}},
+		OrchardClient: mock,
+		Capacity:      NewCapacity(10),
+		State:         NewStateView(mock, time.Millisecond, DefaultWorkerStaleAfter),
+		Logger:        testLogger(),
+	})
+
+	var placed []string
+	b.testCreateOneVM = func(_ context.Context, _, _ uint64, labels map[string]string, _ []any) error {
+		placed = append(placed, labels[PinLabelKey])
+		return nil // not recorded in Orchard: each batch sees both workers idle
+	}
+
+	for batch := 0; batch < 2; batch++ {
+		placed = nil
+		if _, err := b.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+			t.Fatalf("batch %d: %v", batch, err)
+		}
+		b.capacity.Reconcile(0)
+		if len(placed) != 2 || placed[0] == placed[1] {
+			t.Errorf("batch %d placed %v, want one VM on each of a and b", batch, placed)
+		}
+	}
+}
