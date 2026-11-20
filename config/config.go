@@ -99,18 +99,20 @@ type VMConfig struct {
 //
 // When Enabled, vm.cpu and vm.memory are ignored. Instead, each VM is sized
 // from its target worker's advertised `org.cirruslabs.logical-cores` and
-// `org.cirruslabs.memory-mib` resources, minus the configured reserves.
-// The defaults (4 cores + 4096 MiB held back) leave room for macOS, the
-// orchard-worker daemon, and a default Colima Docker VM on the host. If your
+// `org.cirruslabs.memory-mib` resources, minus the configured reserves, split
+// evenly across the worker's `org.cirruslabs.tart-vms` slots (1 when the
+// resource is missing or 0). The reserves are held back once per host, not once
+// per slot. The defaults (4 cores + 4096 MiB held back) leave room for macOS,
+// the orchard-worker daemon, and a default Colima Docker VM on the host. If your
 // Colima profile is bigger, bump ReserveCPU / ReserveMemoryMiB.
 //
-// The bridge selects a free worker per VM and pins placement by copying the
-// worker's orchard-gh-bridge/worker-name label value onto the VM. Each
+// The bridge selects a free worker slot per VM and pins placement by copying
+// the worker's orchard-gh-bridge/worker-name label value onto the VM. Each
 // AutoSize-eligible worker must carry that label with a value no other live
 // worker shares; by convention it is the worker's Name, but it need not stay
-// equal to it (see README's "Worker setup for AutoSize"). One managed VM per
-// worker is enforced by the bridge regardless of the worker's tart-vms slot
-// count.
+// equal to it (see README's "Worker setup for AutoSize"). The bridge places at
+// most as many managed VMs on a worker as it has tart-vms slots, and sizes each
+// at the per-slot share whether or not the other slots are busy.
 type AutoSizeConfig struct {
 	Enabled          bool   `yaml:"enabled"`
 	ReserveCPU       uint64 `yaml:"reserveCPU"`

@@ -203,9 +203,10 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 	return currentActive + created, nil
 }
 
-// handleAutoSizeScaleUp creates one VM per free worker, sized from each
-// worker's advertised resources. Pinned to the chosen worker by setting
-// PinLabelKey to its pin identity.
+// handleAutoSizeScaleUp creates one VM per free worker slot, each sized as its
+// worker's share of the host after reserves (see AutoSizedVM). A worker that
+// advertises several tart-vms slots can take several VMs, one per free slot.
+// Pinned to the chosen worker by setting PinLabelKey to its pin identity.
 func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActive int) (int, error) {
 	if b.state == nil {
 		b.logger.Warn("autoSize requires a StateView; skipping scale-up")
@@ -219,9 +220,12 @@ func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActiv
 
 	reserveCPU, reserveMem := AutoSizeReserves(b.vmConfig.AutoSize.ReserveCPU, b.vmConfig.AutoSize.ReserveMemoryMiB)
 
-	candidates := freeAutoSizeWorkers(snap.Workers, snap.VMs, b.vmConfig.Labels, reserveCPU, reserveMem)
+	// One entry per free slot, round-major, so a worker with two free slots
+	// appears twice and consecutive indices below never reuse a slot while
+	// acquired <= len(candidates).
+	candidates := freeAutoSizeSlots(snap.Workers, snap.VMs, b.vmConfig.Labels, reserveCPU, reserveMem)
 	if len(candidates) == 0 {
-		b.logger.Info("no free autoSize workers", "needed", needed)
+		b.logger.Info("no free autoSize worker slots", "needed", needed)
 		return currentActive, nil
 	}
 	if needed > len(candidates) {

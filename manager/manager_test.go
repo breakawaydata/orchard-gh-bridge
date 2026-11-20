@@ -60,7 +60,7 @@ func TestVMConsumesLabeledWorker_RenamedWorker(t *testing.T) {
 	}
 
 	// Still attributed to the pre-rename Name, which is no longer live: it
-	// holds the renamed machine's slot, as freeAutoSizeWorkers assumes.
+	// holds the renamed machine's slot, as freeAutoSizeSlots assumes.
 	onOldName := scheduled
 	onOldName.Worker = "BreakAwySFMini1.localdomain"
 	if !vmConsumesLabeledWorker(onOldName, workers, large, countAll) {

@@ -2,10 +2,12 @@ package bridge
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/breakawaydata/orchard-gh-bridge/config"
+	"github.com/breakawaydata/orchard-gh-bridge/orchard"
 )
 
 // TestAutoSizePlacement_SpreadsAcrossFreeWorkers reproduces the starvation seen
@@ -62,5 +64,56 @@ func TestAutoSizePlacement_SpreadsAcrossFreeWorkers(t *testing.T) {
 		if placements[name] == 0 {
 			t.Errorf("worker %q never received a VM: %v", name, placements)
 		}
+	}
+}
+
+// TestAutoSizePlacement_TwoSlotWorkerTakesTwoVMs: a worker advertising two
+// tart-vms slots hosts two VMs, each sized as half the host after the reserves
+// (18 cores, 64 GiB, reserves 4 / 4096 -> 7 CPU / 30720 MiB), and a further
+// scale-up with both present creates nothing.
+func TestAutoSizePlacement_TwoSlotWorkerTakesTwoVMs(t *testing.T) {
+	mock := newMockOrchard()
+	w := slotWorker("sfmini", 18, 65536, 2)
+	w.LastSeen = time.Now()
+	mock.workers = []orchard.Worker{w}
+
+	b := New(Config{
+		ScaleSetName:  "test",
+		VMConfig:      config.VMConfig{AutoSize: config.AutoSizeConfig{Enabled: true}},
+		OrchardClient: mock,
+		Capacity:      NewCapacity(10),
+		State:         NewStateView(mock, time.Millisecond, DefaultWorkerStaleAfter),
+		Logger:        testLogger(),
+	})
+
+	type placement struct {
+		cpu, mem uint64
+		pin      string
+	}
+	var placed []placement
+	b.testCreateOneVM = func(_ context.Context, cpu, mem uint64, labels map[string]string, _ []any) error {
+		placed = append(placed, placement{cpu, mem, labels[PinLabelKey]})
+		// Record the VM as Orchard would, pending and pinned, so the next
+		// scale-up sees the slot as taken.
+		name := fmt.Sprintf("gha-orchard-test-%08d", len(placed))
+		mock.mu.Lock()
+		mock.vms[name] = &orchard.VM{Name: name, Status: orchard.VMStatusCreating, Labels: labels}
+		mock.mu.Unlock()
+		return nil
+	}
+
+	if _, err := b.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatalf("first scale-up: %v", err)
+	}
+	want := []placement{{7, 30720, "sfmini"}, {7, 30720, "sfmini"}}
+	if len(placed) != 2 || placed[0] != want[0] || placed[1] != want[1] {
+		t.Fatalf("placements = %+v, want %+v", placed, want)
+	}
+
+	if _, err := b.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatalf("second scale-up: %v", err)
+	}
+	if len(placed) != 2 {
+		t.Errorf("created %d VMs in total, want 2 (both slots already taken)", len(placed))
 	}
 }

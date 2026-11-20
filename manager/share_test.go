@@ -142,3 +142,33 @@ func TestScaleSetShare_PendingVMStillCounted(t *testing.T) {
 		t.Errorf("share=%d workerCap=%d othersActive=%d, want 0/2/2", share, workerCap, othersActive)
 	}
 }
+
+// TestWorkerCapacityFn_AutoSizeSumsSlots: with AutoSize on, the capacity ceiling
+// is the tart-vms slot sum over eligible workers, not the worker count, and each
+// VM of another scale set takes one unit of it.
+func TestWorkerCapacityFn_AutoSizeSumsSlots(t *testing.T) {
+	two := tartWorker("mini1", 2, false)
+	one := tartWorker("mini2", 1, false)
+	paused := tartWorker("mini3", 4, true)
+	undersized := tartWorker("mini4", 4, false)
+	undersized.Resources["org.cirruslabs.logical-cores"] = 3 // below the default 4-core reserve
+	noSlots := autoSizeWorker("mini5", "mini5", largeLabels)
+	delete(noSlots.Resources, "org.cirruslabs.tart-vms") // a missing slot count is one slot
+	workers := []orchard.Worker{two, one, paused, undersized, noSlots}
+
+	if got := workerCapacityFn(true, 0, 0)(workers, largeLabels); got != 4 {
+		t.Errorf("AutoSize capacity = %d, want 4 (2 + 1 + 1; paused and undersized workers left out)", got)
+	}
+	if got := workerCapacityFn(false, 0, 0)(workers, largeLabels); got != 7 {
+		t.Errorf("fixed-slot capacity = %d, want 7 (2 + 1 + 4; the paused worker and the one with no slot count add none)", got)
+	}
+
+	vms := []orchard.VM{
+		otherVM("gha-orchard-other-aaaaaaaa", "mini1", orchard.VMStatusRunning),
+		otherVM("gha-orchard-other-bbbbbbbb", "mini1", orchard.VMStatusRunning),
+	}
+	share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0)
+	if share != 2 || workerCap != 4 || othersActive != 2 {
+		t.Errorf("share=%d workerCap=%d othersActive=%d, want 2/4/2", share, workerCap, othersActive)
+	}
+}
