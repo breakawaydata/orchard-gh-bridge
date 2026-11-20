@@ -40,8 +40,10 @@ type Bridge struct {
 	// Used only in unit tests to inject failures without a real GitHub client.
 	testCreateOneVM func(ctx context.Context, cpu, memory uint64, labels map[string]string, logExtras []any) error
 
-	// placementCursor rotates the starting point into the free-worker list on
-	// each AutoSize scale-up. Without it every scale-up takes candidates[0],
+	// placementCursor rotates the starting worker (not slot) of the eligible
+	// worker list on each AutoSize scale-up; freeAutoSizeSlots rotates before it
+	// expands workers into slots, so a second slot never jumps ahead of another
+	// worker's first. Without it every scale-up takes candidates[0],
 	// and since GitHub usually offers one job at a time, the same worker is
 	// picked every time while the last worker in Orchard's list order never
 	// runs anything.
@@ -203,9 +205,10 @@ func (b *Bridge) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 	return currentActive + created, nil
 }
 
-// handleAutoSizeScaleUp creates one VM per free worker, sized from each
-// worker's advertised resources. Pinned to the chosen worker by setting
-// PinLabelKey to its pin identity.
+// handleAutoSizeScaleUp creates one VM per free worker slot, each sized as its
+// worker's share of the host after reserves (see AutoSizedVM). A worker that
+// advertises several tart-vms slots can take several VMs, one per free slot.
+// Pinned to the chosen worker by setting PinLabelKey to its pin identity.
 func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActive int) (int, error) {
 	if b.state == nil {
 		b.logger.Warn("autoSize requires a StateView; skipping scale-up")
@@ -219,9 +222,14 @@ func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActiv
 
 	reserveCPU, reserveMem := AutoSizeReserves(b.vmConfig.AutoSize.ReserveCPU, b.vmConfig.AutoSize.ReserveMemoryMiB)
 
-	candidates := freeAutoSizeWorkers(snap.Workers, snap.VMs, b.vmConfig.Labels, reserveCPU, reserveMem)
+	// One entry per free slot, round-major over the workers rotated by the
+	// placement cursor, so a worker with two free slots appears twice, every
+	// worker's first slot comes before any worker's second, and consecutive
+	// indices below never reuse a slot while acquired <= len(candidates).
+	start := b.placementCursor.Load()
+	candidates := freeAutoSizeSlots(snap.Workers, snap.VMs, b.vmConfig.Labels, reserveCPU, reserveMem, start)
 	if len(candidates) == 0 {
-		b.logger.Info("no free autoSize workers", "needed", needed)
+		b.logger.Info("no free autoSize worker slots", "needed", needed)
 		return currentActive, nil
 	}
 	if needed > len(candidates) {
@@ -241,14 +249,15 @@ func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActiv
 		"currentActive", currentActive,
 	)
 
-	// Start this batch where the last one left off so placements spread across
-	// the fleet rather than repeatedly landing on the same machine.
-	start := int(b.placementCursor.Add(uint64(acquired)) - uint64(acquired))
+	// The next batch starts where this one left off (the cursor rotates the
+	// worker list inside freeAutoSizeSlots), so placements spread across the
+	// fleet rather than repeatedly landing on the same machine.
+	b.placementCursor.Add(uint64(acquired))
 
 	created := 0
 	skipped := 0
 	for i := 0; i < acquired; i++ {
-		w := candidates[(start+i)%len(candidates)]
+		w := candidates[i]
 		cpu, mem, err := AutoSizedVM(w, reserveCPU, reserveMem)
 		if err != nil {
 			b.logger.Warn("skipping worker for autoSize", "worker", w.Name, "error", err)

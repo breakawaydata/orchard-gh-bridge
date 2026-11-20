@@ -167,7 +167,7 @@ The bridge tracks VM capacity with a global semaphore shared across all scale se
 
 ### VM disk size
 
-`vm.diskSize` (GB) grows each VM's disk when it is created; Orchard runs `tart set --disk-size` on the clone before boot. Leave it unset to keep the image's own disk size. Tart can only grow a disk, so a value smaller than the image's disk makes VM creation fail. The disk is sparse on the host, so it only consumes what the guest writes, but size it so one VM per worker still fits the host's free space.
+`vm.diskSize` (GB) grows each VM's disk when it is created; Orchard runs `tart set --disk-size` on the clone before boot. Leave it unset to keep the image's own disk size. Tart can only grow a disk, so a value smaller than the image's disk makes VM creation fail. The disk is sparse on the host, so it only consumes what the guest writes, but size it so every VM a host can run at once still fits the host's free space: the VM count is the worker's `tart-vms` slot count (so `tart-vms: 2` means two disks of `diskSize` GB on one host).
 
 ### Per-host VM sizing (AutoSize)
 
@@ -190,9 +190,12 @@ scaleSets:
 
 When AutoSize is on:
 
-- `vm.cpu` and `vm.memory` are ignored. Each VM is created with `cpu = workerCores − reserveCPU`, `memory = workerMemoryMiB − reserveMemoryMiB`.
-- The bridge picks one VM per worker and pins placement via a label, so a worker's full resources go to one VM at a time — regardless of its `tart-vms` slot count.
-- Per-scale-set capacity is reported to GitHub as the count of label-matching workers, not the sum of their slots.
+- `vm.cpu` and `vm.memory` are ignored. A worker's **slots** are its `org.cirruslabs.tart-vms` resource (1 when it is missing or 0). The reserves are held back once per host and the rest is split evenly across the slots, rounding down: `cpu = (workerCores − reserveCPU) / slots`, `memory = (workerMemoryMiB − reserveMemoryMiB) / slots`. A worker with `tart-vms` 1, or none, gets the whole host minus the reserves, as it always has.
+- The bridge places one VM per free slot and pins each to its worker via a label, so a worker with `tart-vms: 2` runs up to two VMs at once. Placement spreads across workers before it doubles up on one.
+- Every VM is sized at its slot's share whether or not the other slots are busy, so the VMs on one host never add up to more than the host minus the reserves.
+- Per-scale-set capacity is reported to GitHub as the sum of the slots of the eligible, label-matching workers.
+- Example: a Mac with 18 logical cores and 64 GiB (`memory-mib` 65536), `tart-vms: 2` and the 4 / 4096 reserves gives each VM `(18 − 4) / 2 = 7` CPU and `(65536 − 4096) / 2 = 30720` MiB.
+- A worker with more than one slot must leave each VM at least 1 CPU and 4096 MiB (Tart's default macOS VM memory); a host advertising more slots than it can feed is excluded as `below_reserves` rather than starved. This floor does not apply to single-slot workers.
 - The defaults (4 cores / 4096 MiB reserve) leave room for macOS, the orchard-worker daemon, and a default Colima Docker VM on the host. Bump them if your Colima profile is bigger.
 
 **Worker setup for AutoSize:** each eligible worker self-labels with a pin identity so the bridge can pin a VM there. The label key is `orchard-gh-bridge/worker-name`, and by convention its value is the worker's `--name`:
@@ -213,7 +216,8 @@ A live worker is AutoSize-eligible when it:
 - is not scheduling-paused,
 - has a non-empty `orchard-gh-bridge/worker-name` label,
 - holds that label value alone among live workers — if two live workers share it, a pinned VM could land on either, so **both** are excluded until one goes away,
-- advertises `logical-cores` and `memory-mib`, with more of each than the scale set's reserves.
+- advertises `logical-cores` and `memory-mib`, with more of each than the scale set's reserves,
+- if it advertises more than one `tart-vms` slot, has at least 1 CPU and 4096 MiB left for each VM after the reserves are split across the slots.
 
 Workers that have stopped heartbeating (see `workerStaleAfter`) are not live, so the stale record a rename leaves behind does not make its successor's label look shared.
 
@@ -467,7 +471,7 @@ With metrics enabled it also serves Prometheus metrics at `GET /metrics` on the 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
 | `orchard_gh_bridge_autosize_worker_excluded` | gauge | `scale_set`, `worker`, `pin_label`, `reason` | 1 for each live, label-matching worker an AutoSize scale set cannot use. The series disappears when the worker recovers or goes offline. |
-| `orchard_gh_bridge_autosize_eligible_workers` | gauge | `scale_set` | Live workers each AutoSize scale set can place VMs on. |
+| `orchard_gh_bridge_autosize_eligible_workers` | gauge | `scale_set` | Live workers (not VM slots) each AutoSize scale set can place VMs on. |
 | `orchard_gh_bridge_workers_pruned_total` | counter | | Offline worker records deleted by the cleanup loop. |
 
 A useful alert is any `orchard_gh_bridge_autosize_worker_excluded` series that persists for more than a few minutes, or `orchard_gh_bridge_autosize_eligible_workers` dropping below the expected fleet size.

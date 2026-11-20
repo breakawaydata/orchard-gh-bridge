@@ -529,14 +529,16 @@ func workerCountedFn(autoSize bool, reserveCPU, reserveMemMiB uint64, workers []
 }
 
 // workerCapacityFn returns the capacity-counting function for a scale set:
-// per-worker count when AutoSize is on (one VM per worker, filtered by
-// reserves so undersized workers are not reported as schedulable), or sum of
-// tart-vms slots otherwise.
+// sum of tart-vms slots over the AutoSize-eligible workers when AutoSize is on
+// (each VM takes one slot and is sized as its worker's share, so a worker
+// advertising no slot count counts as one; workers below the reserves or the
+// multi-slot floors are left out so they are not reported as schedulable), or
+// sum of tart-vms slots over every schedulable worker otherwise.
 func workerCapacityFn(autoSize bool, reserveCPU, reserveMemMiB uint64) func([]orchard.Worker, map[string]string) int {
 	if autoSize {
 		cpu, mem := brdg.AutoSizeReserves(reserveCPU, reserveMemMiB)
 		return func(workers []orchard.Worker, labels map[string]string) int {
-			return brdg.WorkerCountForLabels(workers, labels, cpu, mem)
+			return brdg.SlotCountForLabels(workers, labels, cpu, mem)
 		}
 	}
 	return brdg.CapacityForLabels
@@ -568,7 +570,7 @@ func vmConsumesLabeledWorker(vm orchard.VM, workers []orchard.Worker, vmLabels m
 		}
 		// Its worker is no longer live. After a rename the same machine may
 		// still be running it under a new Name with the same labels, so fall
-		// through to label matching — the same fallback freeAutoSizeWorkers
+		// through to label matching — the same fallback freeAutoSizeSlots
 		// applies, keeping the reported share and actual placement in step.
 	}
 	// Pending VM: if its own labels would select any of our label-matching
