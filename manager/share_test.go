@@ -39,7 +39,7 @@ func TestScaleSetShare_PausedWorkerDrainingVM(t *testing.T) {
 		workers := []orchard.Worker{idle, paused}
 		vms := []orchard.VM{otherVM("gha-orchard-other-aaaaaaaa", "mini2", orchard.VMStatusRunning)}
 
-		share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0)
+		share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0, 0)
 		if share != 1 || workerCap != 1 || othersActive != 0 {
 			t.Errorf("share=%d workerCap=%d othersActive=%d, want 1/1/0", share, workerCap, othersActive)
 		}
@@ -53,7 +53,7 @@ func TestScaleSetShare_PausedWorkerDrainingVM(t *testing.T) {
 			otherVM("gha-orchard-other-bbbbbbbb", "mini2", orchard.VMStatusRunning),
 		}
 
-		share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, false, 0, 0)
+		share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, false, 0, 0, 0)
 		if share != 2 || workerCap != 2 || othersActive != 0 {
 			t.Errorf("share=%d workerCap=%d othersActive=%d, want 2/2/0", share, workerCap, othersActive)
 		}
@@ -66,7 +66,7 @@ func TestScaleSetShare_PausedWorkerDrainingVM(t *testing.T) {
 		workers := []orchard.Worker{idle, small}
 		vms := []orchard.VM{otherVM("gha-orchard-other-aaaaaaaa", "mini2", orchard.VMStatusRunning)}
 
-		share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0)
+		share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0, 0)
 		if share != 1 || workerCap != 1 || othersActive != 0 {
 			t.Errorf("share=%d workerCap=%d othersActive=%d, want 1/1/0", share, workerCap, othersActive)
 		}
@@ -86,7 +86,7 @@ func TestScaleSetShare_NothingPaused(t *testing.T) {
 			otherVM("gha-orchard-other-stopped", "mini1", orchard.VMStatusStopped),
 		}
 
-		share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0)
+		share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0, 0)
 		if share != 1 || workerCap != 2 || othersActive != 1 {
 			t.Errorf("share=%d workerCap=%d othersActive=%d, want 1/2/1", share, workerCap, othersActive)
 		}
@@ -99,7 +99,7 @@ func TestScaleSetShare_NothingPaused(t *testing.T) {
 			otherVM("gha-orchard-other-bbbbbbbb", "mini2", orchard.VMStatusRunning),
 		}
 
-		share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, false, 0, 0)
+		share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, false, 0, 0, 0)
 		if share != 2 || workerCap != 4 || othersActive != 2 {
 			t.Errorf("share=%d workerCap=%d othersActive=%d, want 2/4/2", share, workerCap, othersActive)
 		}
@@ -112,7 +112,7 @@ func TestScaleSetShare_NothingPaused(t *testing.T) {
 			otherVM("gha-orchard-other-bbbbbbbb", "", orchard.VMStatusCreating),
 		}
 
-		share, _, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0)
+		share, _, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0, 0)
 		if share != 0 || othersActive != 2 {
 			t.Errorf("share=%d othersActive=%d, want 0/2", share, othersActive)
 		}
@@ -137,7 +137,7 @@ func TestScaleSetShare_PendingVMStillCounted(t *testing.T) {
 	pendingOnPaused := otherVM("gha-orchard-other-bbbbbbbb", "", orchard.VMStatusCreating)
 	pendingOnPaused.Labels[brdg.PinLabelKey] = "mini2"
 
-	share, workerCap, othersActive := scaleSetShare(workers, []orchard.VM{pendingOnIdle, pendingOnPaused}, largeLabels, true, 0, 0)
+	share, workerCap, othersActive := scaleSetShare(workers, []orchard.VM{pendingOnIdle, pendingOnPaused}, largeLabels, true, 0, 0, 0)
 	if share != 0 || workerCap != 2 || othersActive != 2 {
 		t.Errorf("share=%d workerCap=%d othersActive=%d, want 0/2/2", share, workerCap, othersActive)
 	}
@@ -156,10 +156,10 @@ func TestWorkerCapacityFn_AutoSizeSumsSlots(t *testing.T) {
 	delete(noSlots.Resources, "org.cirruslabs.tart-vms") // a missing slot count is one slot
 	workers := []orchard.Worker{two, one, paused, undersized, noSlots}
 
-	if got := workerCapacityFn(true, 0, 0)(workers, largeLabels); got != 4 {
+	if got := workerCapacityFn(true, 0, 0, 0)(workers, largeLabels); got != 4 {
 		t.Errorf("AutoSize capacity = %d, want 4 (2 + 1 + 1; paused and undersized workers left out)", got)
 	}
-	if got := workerCapacityFn(false, 0, 0)(workers, largeLabels); got != 7 {
+	if got := workerCapacityFn(false, 0, 0, 0)(workers, largeLabels); got != 7 {
 		t.Errorf("fixed-slot capacity = %d, want 7 (2 + 1 + 4; the paused worker and the one with no slot count add none)", got)
 	}
 
@@ -167,8 +167,31 @@ func TestWorkerCapacityFn_AutoSizeSumsSlots(t *testing.T) {
 		otherVM("gha-orchard-other-aaaaaaaa", "mini1", orchard.VMStatusRunning),
 		otherVM("gha-orchard-other-bbbbbbbb", "mini1", orchard.VMStatusRunning),
 	}
-	share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0)
+	share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0, 0)
 	if share != 2 || workerCap != 4 || othersActive != 2 {
 		t.Errorf("share=%d workerCap=%d othersActive=%d, want 2/4/2", share, workerCap, othersActive)
+	}
+}
+
+// With autoSize.minMemoryMiB set, a scale set's capacity counts only the slots
+// on workers at or above the floor, and a VM of another scale set running on a
+// worker below the floor is not subtracted from it. Unset, both minis count.
+func TestScaleSetShare_MinMemory(t *testing.T) {
+	small1 := autoSizeWorker("mini1", "mini1", largeLabels)
+	small1.Resources["org.cirruslabs.memory-mib"] = 16384
+	small2 := autoSizeWorker("mini2", "mini2", largeLabels)
+	small2.Resources["org.cirruslabs.memory-mib"] = 16384
+	big := autoSizeWorker("m3pro", "m3pro", largeLabels)
+	big.Resources["org.cirruslabs.memory-mib"] = 36864
+	workers := []orchard.Worker{small1, small2, big}
+	vms := []orchard.VM{otherVM("gha-orchard-other-aaaaaaaa", "mini1", orchard.VMStatusRunning)}
+
+	share, workerCap, othersActive := scaleSetShare(workers, vms, largeLabels, true, 0, 0, 0)
+	if share != 2 || workerCap != 3 || othersActive != 1 {
+		t.Errorf("unset: share=%d workerCap=%d othersActive=%d, want 2/3/1", share, workerCap, othersActive)
+	}
+	share, workerCap, othersActive = scaleSetShare(workers, vms, largeLabels, true, 0, 0, 32768)
+	if share != 1 || workerCap != 1 || othersActive != 0 {
+		t.Errorf("minMemoryMiB 32768: share=%d workerCap=%d othersActive=%d, want 1/1/0", share, workerCap, othersActive)
 	}
 }

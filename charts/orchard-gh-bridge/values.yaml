@@ -116,6 +116,7 @@ config:
     #       enabled: false     # Each VM gets the host's cores/memory minus the reserves below, split across the worker's tart-vms slots.
     #       reserveCPU: 4      # Held back for macOS + orchard-worker + Colima. Default 4.
     #       reserveMemoryMiB: 4096  # Held back for host overhead. Default 4096.
+    #       minMemoryMiB: 0    # Only place on workers advertising at least this memory-mib (host total). 0 = no floor.
   health:
     port: 8080
 # --- Secrets ---

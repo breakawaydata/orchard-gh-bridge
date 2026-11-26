@@ -83,11 +83,11 @@ func TestWorkerCountForLabels_ExcludesOfflineWorker(t *testing.T) {
 	all := []orchard.Worker{live, abandoned}
 
 	// Before filtering, the abandoned registration inflates capacity.
-	if got := WorkerCountForLabels(all, labels, 4, 4096); got != 2 {
+	if got := WorkerCountForLabels(all, labels, 4, 4096, 0); got != 2 {
 		t.Fatalf("unfiltered capacity = %d, want 2 (precondition)", got)
 	}
 
-	got := WorkerCountForLabels(LiveWorkers(all, DefaultWorkerStaleAfter, now), labels, 4, 4096)
+	got := WorkerCountForLabels(LiveWorkers(all, DefaultWorkerStaleAfter, now), labels, 4, 4096, 0)
 	if got != 1 {
 		t.Errorf("capacity with offline worker excluded = %d, want 1", got)
 	}
