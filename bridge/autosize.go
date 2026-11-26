@@ -53,6 +53,10 @@ const (
 	ExclusionDuplicatePinLabel = "duplicate_pin_label"
 	ExclusionMissingResources  = "missing_resources"
 	ExclusionBelowReserves     = "below_reserves"
+	// ExclusionBelowMinMemory marks a worker that is healthy but advertises
+	// less memory than the scale set's autoSize.minMemoryMiB. Unlike the other
+	// reasons it is a deliberate choice of the scale set, not a worker fault.
+	ExclusionBelowMinMemory = "below_min_memory"
 )
 
 // PinIdentity returns the identity AutoSize pins VMs by: the worker's
@@ -121,11 +125,16 @@ func autoSizeShare(w orchard.Worker, reserveCPU, reserveMemMiB uint64) (cpu, mem
 }
 
 // AutoSizeExclusionReason returns why w cannot take an AutoSize VM with the
-// given reserves, or "" if it can. pinCounts must come from PinCounts over the
-// same live worker set: a pin identity held by more than one live worker is
-// unusable, because Orchard could schedule the pinned VM onto either holder
-// and the bridge sized it for only one of them.
-func AutoSizeExclusionReason(w orchard.Worker, pinCounts map[string]int, reserveCPU, reserveMemMiB uint64) string {
+// given reserves and minimum memory, or "" if it can. pinCounts must come from
+// PinCounts over the same live worker set: a pin identity held by more than one
+// live worker is unusable, because Orchard could schedule the pinned VM onto
+// either holder and the bridge sized it for only one of them.
+//
+// minMemMiB is the scale set's autoSize.minMemoryMiB: when non-zero, a worker
+// whose advertised org.cirruslabs.memory-mib (the host's total, before the
+// reserves and the slot split) is below it is excluded as
+// ExclusionBelowMinMemory. Zero turns the check off.
+func AutoSizeExclusionReason(w orchard.Worker, pinCounts map[string]int, reserveCPU, reserveMemMiB, minMemMiB uint64) string {
 	if w.SchedulingPaused {
 		return ExclusionSchedulingPaused
 	}
@@ -147,19 +156,27 @@ func AutoSizeExclusionReason(w orchard.Worker, pinCounts map[string]int, reserve
 	if _, _, err := autoSizeShare(w, reserveCPU, reserveMemMiB); err != nil {
 		return ExclusionBelowReserves
 	}
+	// Checked last so a worker that is also misconfigured reports that fault,
+	// not the scale set's deliberate floor.
+	if minMemMiB > 0 && w.Resources[resourceMemoryMiB] < minMemMiB {
+		return ExclusionBelowMinMemory
+	}
 	return ""
 }
 
 // autoSizeCandidates returns the workers that match vmLabels and can take an
-// AutoSize VM with the given reserves, in input order.
-func autoSizeCandidates(workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB uint64) []orchard.Worker {
+// AutoSize VM with the given reserves and minimum memory, in input order.
+// Pin uniqueness is judged over all of workers, not only the ones that pass
+// the memory floor, so a small worker sharing a big one's pin still makes
+// that pin unusable.
+func autoSizeCandidates(workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB, minMemMiB uint64) []orchard.Worker {
 	counts := PinCounts(workers)
 	out := make([]orchard.Worker, 0, len(workers))
 	for _, w := range workers {
 		if !workerMatchesLabels(w, vmLabels) {
 			continue
 		}
-		if AutoSizeExclusionReason(w, counts, reserveCPU, reserveMemMiB) != "" {
+		if AutoSizeExclusionReason(w, counts, reserveCPU, reserveMemMiB, minMemMiB) != "" {
 			continue
 		}
 		out = append(out, w)
@@ -171,24 +188,27 @@ func autoSizeCandidates(workers []orchard.Worker, vmLabels map[string]string, re
 // workers that can satisfy the given reserves. It counts workers, not VM slots:
 // it backs the eligible-workers gauge. The per-scale-set capacity ceiling is
 // SlotCountForLabels. workers must be the live set (see PinCounts).
-func WorkerCountForLabels(workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB uint64) int {
-	return len(autoSizeCandidates(workers, vmLabels, reserveCPU, reserveMemMiB))
+func WorkerCountForLabels(workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB, minMemMiB uint64) int {
+	return len(autoSizeCandidates(workers, vmLabels, reserveCPU, reserveMemMiB, minMemMiB))
 }
 
 // SlotCountForLabels returns the number of VMs the label-matching,
 // AutoSize-eligible workers can host at once: the sum of AutoSizeSlots over
 // them. Used as the per-scale-set capacity ceiling when AutoSize is enabled.
 // workers must be the live set (see PinCounts).
-func SlotCountForLabels(workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB uint64) int {
+func SlotCountForLabels(workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB, minMemMiB uint64) int {
 	total := 0
-	for _, w := range autoSizeCandidates(workers, vmLabels, reserveCPU, reserveMemMiB) {
+	for _, w := range autoSizeCandidates(workers, vmLabels, reserveCPU, reserveMemMiB, minMemMiB) {
 		total += int(AutoSizeSlots(w))
 	}
 	return total
 }
 
 // freeAutoSizeSlots returns one entry per free VM slot on the AutoSize-eligible
-// workers that match vmLabels and satisfy the given reserves. A worker's free
+// workers that match vmLabels and satisfy the given reserves and minimum
+// memory (minMemMiB, 0 for none). A worker below the minimum is never offered,
+// even when it is the only free one; the cursor rotates over the workers that
+// qualify. A worker's free
 // slots are the smaller of two numbers:
 //
 //   - its AutoSizeSlots minus the non-terminal managed VMs assigned (or
@@ -209,9 +229,9 @@ func SlotCountForLabels(workers []orchard.Worker, vmLabels map[string]string, re
 // expanded, so the round boundaries survive the rotation: consecutive batches
 // walk the workers cyclically and no worker's second slot is offered ahead of
 // another worker's first. A cursor of 0 keeps input order.
-func freeAutoSizeSlots(workers []orchard.Worker, vms []orchard.VM, vmLabels map[string]string, reserveCPU, reserveMemMiB, cursor uint64) []orchard.Worker {
+func freeAutoSizeSlots(workers []orchard.Worker, vms []orchard.VM, vmLabels map[string]string, reserveCPU, reserveMemMiB, minMemMiB, cursor uint64) []orchard.Worker {
 	inUse := managedPinUsage(vms, workers)
-	candidates := autoSizeCandidates(workers, vmLabels, reserveCPU, reserveMemMiB)
+	candidates := autoSizeCandidates(workers, vmLabels, reserveCPU, reserveMemMiB, minMemMiB)
 	if len(candidates) > 1 {
 		offset := int(cursor % uint64(len(candidates)))
 		candidates = append(candidates[offset:len(candidates):len(candidates)], candidates[:offset]...)

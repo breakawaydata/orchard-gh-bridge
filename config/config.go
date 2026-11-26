@@ -113,10 +113,17 @@ type VMConfig struct {
 // equal to it (see README's "Worker setup for AutoSize"). The bridge places at
 // most as many managed VMs on a worker as it has tart-vms slots, and sizes each
 // at the per-slot share whether or not the other slots are busy.
+//
+// MinMemoryMiB, when non-zero, limits the scale set to workers that advertise
+// at least that much `org.cirruslabs.memory-mib` (the host's total, before the
+// reserves and the slot split). Smaller workers are left out of its placement
+// and its capacity, so a job waits for a big enough worker instead of landing
+// on a small one. Zero, the default, keeps every eligible worker.
 type AutoSizeConfig struct {
 	Enabled          bool   `yaml:"enabled"`
 	ReserveCPU       uint64 `yaml:"reserveCPU"`
 	ReserveMemoryMiB uint64 `yaml:"reserveMemoryMiB"`
+	MinMemoryMiB     uint64 `yaml:"minMemoryMiB,omitempty"`
 }
 
 type HealthConfig struct {

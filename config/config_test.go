@@ -90,6 +90,46 @@ scaleSets:
 	}
 }
 
+func TestLoad_AutoSizeMinMemory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := `
+orchard:
+  address: http://localhost:6120
+github:
+  token: ghp_test123
+scaleSets:
+  - name: xlarge
+    githubConfigURL: https://github.com/testorg
+    labels: [self-hosted, macOS]
+    vm:
+      image: ghcr.io/cirruslabs/macos-sequoia-xcode:latest
+      autoSize:
+        enabled: true
+        minMemoryMiB: 32768
+  - name: large
+    githubConfigURL: https://github.com/testorg
+    labels: [self-hosted, macOS]
+    vm:
+      image: ghcr.io/cirruslabs/macos-sequoia-xcode:latest
+      autoSize:
+        enabled: true
+`
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cfg.ScaleSets[0].VM.AutoSize.MinMemoryMiB; got != 32768 {
+		t.Errorf("xlarge MinMemoryMiB = %d, want 32768", got)
+	}
+	if got := cfg.ScaleSets[1].VM.AutoSize.MinMemoryMiB; got != 0 {
+		t.Errorf("large MinMemoryMiB = %d, want 0 (unset means no floor)", got)
+	}
+}
+
 func TestLoad_Defaults(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

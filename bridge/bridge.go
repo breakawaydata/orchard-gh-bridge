@@ -106,6 +106,13 @@ func (b *Bridge) AutoSizeReserveConfig() (reserveCPU, reserveMemMiB uint64) {
 	return b.vmConfig.AutoSize.ReserveCPU, b.vmConfig.AutoSize.ReserveMemoryMiB
 }
 
+// AutoSizeMinMemoryMiB returns the scale set's autoSize.minMemoryMiB: the least
+// org.cirruslabs.memory-mib a worker must advertise to take this scale set's
+// VMs. 0 means no floor.
+func (b *Bridge) AutoSizeMinMemoryMiB() uint64 {
+	return b.vmConfig.AutoSize.MinMemoryMiB
+}
+
 // HydrateFromOrchard populates activeVMs from existing managed VMs in Orchard
 // that belong to this scale set. Returns the number of VMs adopted so the
 // caller can reserve those slots in the shared Capacity. Called once before
@@ -221,15 +228,30 @@ func (b *Bridge) handleAutoSizeScaleUp(ctx context.Context, needed, currentActiv
 	}
 
 	reserveCPU, reserveMem := AutoSizeReserves(b.vmConfig.AutoSize.ReserveCPU, b.vmConfig.AutoSize.ReserveMemoryMiB)
+	minMem := b.vmConfig.AutoSize.MinMemoryMiB
 
 	// One entry per free slot, round-major over the workers rotated by the
 	// placement cursor, so a worker with two free slots appears twice, every
 	// worker's first slot comes before any worker's second, and consecutive
 	// indices below never reuse a slot while acquired <= len(candidates).
 	start := b.placementCursor.Load()
-	candidates := freeAutoSizeSlots(snap.Workers, snap.VMs, b.vmConfig.Labels, reserveCPU, reserveMem, start)
+	candidates := freeAutoSizeSlots(snap.Workers, snap.VMs, b.vmConfig.Labels, reserveCPU, reserveMem, minMem, start)
 	if len(candidates) == 0 {
-		b.logger.Info("no free autoSize worker slots", "needed", needed)
+		// The job stays in GitHub's queue, exactly as when every worker is
+		// busy, and is retried on the next desired-count event. With a memory
+		// floor, say how many otherwise-free workers it turned away, so a
+		// waiting job is explained rather than mysterious.
+		args := []any{"needed", needed}
+		if minMem > 0 {
+			// Without the floor, the free slots are exactly those on workers
+			// below it, since none qualifying is free.
+			below := len(freeAutoSizeSlots(snap.Workers, snap.VMs, b.vmConfig.Labels, reserveCPU, reserveMem, 0, 0))
+			args = append(args, "minMemoryMiB", minMem, "freeSlotsBelowMinMemory", below)
+			if below > 0 {
+				args = append(args, "reason", "every free worker advertises less memory than minMemoryMiB")
+			}
+		}
+		b.logger.Info("no free autoSize worker slots", args...)
 		return currentActive, nil
 	}
 	if needed > len(candidates) {

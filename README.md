@@ -197,6 +197,7 @@ When AutoSize is on:
 - Example: a Mac with 18 logical cores and 64 GiB (`memory-mib` 65536), `tart-vms: 2` and the 4 / 4096 reserves gives each VM `(18 − 4) / 2 = 7` CPU and `(65536 − 4096) / 2 = 30720` MiB.
 - A worker with more than one slot must leave each VM at least 1 CPU and 4096 MiB (Tart's default macOS VM memory); a host advertising more slots than it can feed is excluded as `below_reserves` rather than starved. This floor does not apply to single-slot workers.
 - The defaults (4 cores / 4096 MiB reserve) leave room for macOS, the orchard-worker daemon, and a default Colima Docker VM on the host. Bump them if your Colima profile is bigger.
+- `vm.autoSize.minMemoryMiB` (optional) keeps a scale set off small hosts without a separate worker label: a worker whose advertised `memory-mib` (the host's total, before the reserves and the slot split) is below it is left out of that scale set's placement and capacity. When every free worker is below it, the job waits in GitHub's queue as it would with no free worker, and the bridge logs one `no free autoSize worker slots` line with `minMemoryMiB`, `freeSlotsBelowMinMemory` and the reason. It never falls back to a smaller worker. Unset or `0` keeps every eligible worker, as before. Example: `minMemoryMiB: 32768` on a fleet of 16 GiB and 36 / 64 GiB Macs uses only the bigger two.
 
 **Worker setup for AutoSize:** each eligible worker self-labels with a pin identity so the bridge can pin a VM there. The label key is `orchard-gh-bridge/worker-name`, and by convention its value is the worker's `--name`:
 
@@ -217,11 +218,12 @@ A live worker is AutoSize-eligible when it:
 - has a non-empty `orchard-gh-bridge/worker-name` label,
 - holds that label value alone among live workers — if two live workers share it, a pinned VM could land on either, so **both** are excluded until one goes away,
 - advertises `logical-cores` and `memory-mib`, with more of each than the scale set's reserves,
-- if it advertises more than one `tart-vms` slot, has at least 1 CPU and 4096 MiB left for each VM after the reserves are split across the slots.
+- if it advertises more than one `tart-vms` slot, has at least 1 CPU and 4096 MiB left for each VM after the reserves are split across the slots,
+- if the scale set sets `autoSize.minMemoryMiB`, advertises at least that much `memory-mib`.
 
 Workers that have stopped heartbeating (see `workerStaleAfter`) are not live, so the stale record a rename leaves behind does not make its successor's label look shared.
 
-**Exclusions are never silent.** When a label-matching live worker is left out of an AutoSize scale set, the bridge logs a WARN naming the scale set, worker, pin label and reason (`scheduling_paused`, `missing_pin_label`, `duplicate_pin_label`, `missing_resources`, `below_reserves`). It logs once when the state changes, not every reconcile, and an INFO when the worker becomes eligible again. The same state is exported as metrics (see [Monitoring](#monitoring)).
+**Exclusions are never silent.** When a label-matching live worker is left out of an AutoSize scale set, the bridge logs a WARN naming the scale set, worker, pin label and reason (`scheduling_paused`, `missing_pin_label`, `duplicate_pin_label`, `missing_resources`, `below_reserves`, or `below_min_memory`, which is logged at INFO because it is the scale set's own choice rather than a worker fault). It logs once when the state changes, not every reconcile, and an INFO when the worker becomes eligible again. The same state is exported as metrics (see [Monitoring](#monitoring)).
 
 **Offline worker records are pruned.** A renamed or re-imaged Mac registers as a new worker and leaves its old record behind. The cleanup loop deletes a worker record once it has been offline longer than `workerPruneAfter` (default `1h`; `"0"` disables it). It never deletes a worker that is still live, one with any VM assigned to it, or one that is scheduling-paused, since an operator paused it deliberately (it logs that at INFO instead). A worker that is still running registers itself again the next time it connects, so a prune loses nothing.
 
@@ -474,7 +476,7 @@ With metrics enabled it also serves Prometheus metrics at `GET /metrics` on the 
 | `orchard_gh_bridge_autosize_eligible_workers` | gauge | `scale_set` | Live workers (not VM slots) each AutoSize scale set can place VMs on. |
 | `orchard_gh_bridge_workers_pruned_total` | counter | | Offline worker records deleted by the cleanup loop. |
 
-A useful alert is any `orchard_gh_bridge_autosize_worker_excluded` series that persists for more than a few minutes, or `orchard_gh_bridge_autosize_eligible_workers` dropping below the expected fleet size.
+A useful alert is any `orchard_gh_bridge_autosize_worker_excluded` series other than `reason="below_min_memory"` (which is permanent by design) that persists for more than a few minutes, or `orchard_gh_bridge_autosize_eligible_workers` dropping below the expected fleet size.
 
 Monitor VMs from the command line:
 

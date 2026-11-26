@@ -19,7 +19,7 @@ func TestAutoSizeExclusions_DuplicateNamesTheOtherHolders(t *testing.T) {
 		// Does not match the scale set's labels: not this pool's concern.
 		{Name: "other-pool", Labels: map[string]string{"class": "thin"}},
 	}
-	got := AutoSizeExclusions(workers, nil, 4, 4096)
+	got := AutoSizeExclusions(workers, nil, 4, 4096, 0)
 	// other-pool matches nil labels too, and lacks a pin label.
 	if len(got) != 3 {
 		t.Fatalf("exclusions = %+v, want 3", got)
@@ -31,7 +31,7 @@ func TestAutoSizeExclusions_DuplicateNamesTheOtherHolders(t *testing.T) {
 		t.Errorf("exclusion[2] = %+v", got[2])
 	}
 
-	scoped := AutoSizeExclusions(workers, map[string]string{"class": "thin"}, 4, 4096)
+	scoped := AutoSizeExclusions(workers, map[string]string{"class": "thin"}, 4, 4096, 0)
 	if len(scoped) != 1 || scoped[0].Worker != "other-pool" {
 		t.Errorf("label-scoped exclusions = %+v, want only other-pool", scoped)
 	}
@@ -49,7 +49,7 @@ func TestEligibilityMonitor_WarnsOncePerStateChange(t *testing.T) {
 		mkWorker("ok", 10, 32768, 1, nil),
 	}
 	for range 3 {
-		m.Observe("large", dup, nil, 4, 4096)
+		m.Observe("large", dup, nil, 4, 4096, 0)
 	}
 	out := buf.String()
 	if n := strings.Count(out, "level=WARN"); n != 2 {
@@ -70,7 +70,7 @@ func TestEligibilityMonitor_WarnsOncePerStateChange(t *testing.T) {
 	// mini-b goes offline (drops out of the live list): mini-a's label is now
 	// unique, so it recovers.
 	buf.Reset()
-	m.Observe("large", []orchard.Worker{dup[0], dup[2]}, nil, 4, 4096)
+	m.Observe("large", []orchard.Worker{dup[0], dup[2]}, nil, 4, 4096, 0)
 	out = buf.String()
 	if strings.Contains(out, "level=WARN") {
 		t.Errorf("unexpected WARN on recovery:\n%s", out)
@@ -96,11 +96,11 @@ func TestEligibilityMonitor_ReasonChangeWarnsAgain(t *testing.T) {
 
 	w := mkWorker("w1", 10, 32768, 1, nil)
 	w.SchedulingPaused = true
-	m.Observe("large", []orchard.Worker{w}, nil, 4, 4096)
+	m.Observe("large", []orchard.Worker{w}, nil, 4, 4096, 0)
 
 	delete(w.Labels, PinLabelKey)
 	w.SchedulingPaused = false
-	m.Observe("large", []orchard.Worker{w}, nil, 4, 4096)
+	m.Observe("large", []orchard.Worker{w}, nil, 4, 4096, 0)
 
 	out := buf.String()
 	if n := strings.Count(out, "level=WARN"); n != 2 {
@@ -124,11 +124,11 @@ func TestEligibilityMonitor_DuplicatePartnerChangeWarnsAgain(t *testing.T) {
 	a := mkRenamedWorker("mini-a", "shared", 10, 32768, now, nil)
 	b := mkRenamedWorker("mini-b", "shared", 10, 32768, now, nil)
 	c := mkRenamedWorker("mini-c", "shared", 10, 32768, now, nil)
-	m.Observe("large", []orchard.Worker{a, b}, nil, 4, 4096)
+	m.Observe("large", []orchard.Worker{a, b}, nil, 4, 4096, 0)
 	buf.Reset()
 	// mini-b leaves and mini-c arrives with the same label: mini-a is still
 	// excluded for the same reason, but against a different worker.
-	m.Observe("large", []orchard.Worker{a, c}, nil, 4, 4096)
+	m.Observe("large", []orchard.Worker{a, c}, nil, 4, 4096, 0)
 	out := buf.String()
 	if !strings.Contains(out, "worker=mini-a") || !strings.Contains(out, "sharedWith=mini-c") {
 		t.Errorf("changed duplicate partner not re-warned:\n%s", out)
@@ -138,7 +138,7 @@ func TestEligibilityMonitor_DuplicatePartnerChangeWarnsAgain(t *testing.T) {
 func TestEligibilityMonitor_BelowReservesIsReported(t *testing.T) {
 	var buf bytes.Buffer
 	m := NewEligibilityMonitor(captureLogger(&buf), nil)
-	m.Observe("large", []orchard.Worker{mkWorker("small", 4, 32768, 1, nil)}, nil, 4, 4096)
+	m.Observe("large", []orchard.Worker{mkWorker("small", 4, 32768, 1, nil)}, nil, 4, 4096, 0)
 	if !strings.Contains(buf.String(), "reason=below_reserves") {
 		t.Errorf("below-reserves exclusion not warned:\n%s", buf.String())
 	}
@@ -149,9 +149,9 @@ func TestEligibilityMonitor_ScaleSetsTrackedIndependently(t *testing.T) {
 	m := NewEligibilityMonitor(captureLogger(&buf), nil)
 	w := mkWorker("w1", 10, 32768, 1, nil)
 	w.SchedulingPaused = true
-	m.Observe("a", []orchard.Worker{w}, nil, 4, 4096)
-	m.Observe("b", []orchard.Worker{w}, nil, 4, 4096)
-	m.Observe("a", []orchard.Worker{w}, nil, 4, 4096)
+	m.Observe("a", []orchard.Worker{w}, nil, 4, 4096, 0)
+	m.Observe("b", []orchard.Worker{w}, nil, 4, 4096, 0)
+	m.Observe("a", []orchard.Worker{w}, nil, 4, 4096, 0)
 	if n := strings.Count(buf.String(), "level=WARN"); n != 2 {
 		t.Errorf("WARN lines = %d, want 2 (one per scale set):\n%s", n, buf.String())
 	}

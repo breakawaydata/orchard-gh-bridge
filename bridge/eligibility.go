@@ -22,16 +22,16 @@ type AutoSizeExclusion struct {
 }
 
 // AutoSizeExclusions returns every worker in workers that matches vmLabels but
-// is not AutoSize-eligible with the given reserves, in input order. workers
-// must be the live set, as for WorkerCountForLabels.
-func AutoSizeExclusions(workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB uint64) []AutoSizeExclusion {
+// is not AutoSize-eligible with the given reserves and minimum memory, in input
+// order. workers must be the live set, as for WorkerCountForLabels.
+func AutoSizeExclusions(workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB, minMemMiB uint64) []AutoSizeExclusion {
 	counts := PinCounts(workers)
 	var out []AutoSizeExclusion
 	for _, w := range workers {
 		if !workerMatchesLabels(w, vmLabels) {
 			continue
 		}
-		reason := AutoSizeExclusionReason(w, counts, reserveCPU, reserveMemMiB)
+		reason := AutoSizeExclusionReason(w, counts, reserveCPU, reserveMemMiB, minMemMiB)
 		if reason == "" {
 			continue
 		}
@@ -50,7 +50,8 @@ func AutoSizeExclusions(workers []orchard.Worker, vmLabels map[string]string, re
 
 // EligibilityMonitor reports AutoSize exclusions so a worker never drops out
 // of a pool silently. It logs a WARN when a worker becomes excluded or its
-// reason changes, an INFO when it recovers, and nothing while the state holds,
+// reason changes (an INFO for ExclusionBelowMinMemory, which is the scale
+// set's own choice rather than a fault), an INFO when it recovers, and nothing while the state holds,
 // so a reconcile loop can call Observe every tick without flooding the log.
 // The current state is also exported as gauges.
 type EligibilityMonitor struct {
@@ -83,13 +84,14 @@ func NewEligibilityMonitor(logger *slog.Logger, reg *metrics.Registry) *Eligibil
 
 // Observe evaluates one AutoSize scale set against the current live workers.
 // reserveCPU and reserveMemMiB are the effective reserves (after
-// AutoSizeReserves).
-func (m *EligibilityMonitor) Observe(scaleSet string, workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB uint64) {
+// AutoSizeReserves); minMemMiB is the scale set's autoSize.minMemoryMiB (0 for
+// none).
+func (m *EligibilityMonitor) Observe(scaleSet string, workers []orchard.Worker, vmLabels map[string]string, reserveCPU, reserveMemMiB, minMemMiB uint64) {
 	if m == nil {
 		return
 	}
 	current := make(map[string]AutoSizeExclusion)
-	for _, ex := range AutoSizeExclusions(workers, vmLabels, reserveCPU, reserveMemMiB) {
+	for _, ex := range AutoSizeExclusions(workers, vmLabels, reserveCPU, reserveMemMiB, minMemMiB) {
 		current[ex.Worker] = ex
 	}
 	present := make(map[string]bool, len(workers))
@@ -120,7 +122,11 @@ func (m *EligibilityMonitor) Observe(scaleSet string, workers []orchard.Worker, 
 		if len(ex.SharedWith) > 0 {
 			args = append(args, "sharedWith", strings.Join(ex.SharedWith, ","))
 		}
-		m.logger.Warn("worker excluded from AutoSize scale set", args...)
+		if ex.Reason == ExclusionBelowMinMemory {
+			m.logger.Info("worker excluded from AutoSize scale set", args...)
+		} else {
+			m.logger.Warn("worker excluded from AutoSize scale set", args...)
+		}
 	}
 
 	for _, name := range sortedKeys(prev) {
@@ -141,7 +147,7 @@ func (m *EligibilityMonitor) Observe(scaleSet string, workers []orchard.Worker, 
 	}
 
 	m.last[scaleSet] = current
-	m.eligible.Set(float64(WorkerCountForLabels(workers, vmLabels, reserveCPU, reserveMemMiB)), scaleSet)
+	m.eligible.Set(float64(WorkerCountForLabels(workers, vmLabels, reserveCPU, reserveMemMiB, minMemMiB)), scaleSet)
 }
 
 // sameExclusion reports whether two observations describe the same state. A

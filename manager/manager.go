@@ -238,7 +238,7 @@ func (m *Manager) observeAutoSizeEligibility(workers []orchard.Worker) {
 			continue
 		}
 		cpu, mem := brdg.AutoSizeReserves(ss.VM.AutoSize.ReserveCPU, ss.VM.AutoSize.ReserveMemoryMiB)
-		m.eligibility.Observe(ss.Name, workers, ss.VM.Labels, cpu, mem)
+		m.eligibility.Observe(ss.Name, workers, ss.VM.Labels, cpu, mem, ss.VM.AutoSize.MinMemoryMiB)
 	}
 }
 
@@ -262,7 +262,7 @@ func (m *Manager) runScaleSet(ctx context.Context, ssCfg config.ScaleSetConfig) 
 	// Wait for matching workers before creating the session so GitHub
 	// never sees maxCapacity=0 (which causes it to skip routing jobs
 	// to the scale set even after capacity increases).
-	capacityFn := workerCapacityFn(ssCfg.VM.AutoSize.Enabled, ssCfg.VM.AutoSize.ReserveCPU, ssCfg.VM.AutoSize.ReserveMemoryMiB)
+	capacityFn := workerCapacityFn(ssCfg.VM.AutoSize.Enabled, ssCfg.VM.AutoSize.ReserveCPU, ssCfg.VM.AutoSize.ReserveMemoryMiB, ssCfg.VM.AutoSize.MinMemoryMiB)
 	var maxRunners int
 	if ssCfg.MaxRunners > 0 {
 		maxRunners = ssCfg.MaxRunners
@@ -473,7 +473,7 @@ func (m *Manager) recomputeScaleSetShares(ctx context.Context) {
 			othersVMs = append(othersVMs, snap.ManagedVMsForScaleSet(other.bridge.ScaleSetName())...)
 		}
 		share, workerCap, othersActive := scaleSetShare(snap.Workers, othersVMs, h.bridge.VMLabels(),
-			h.bridge.AutoSizeEnabled(), reserveCPU, reserveMemMiB)
+			h.bridge.AutoSizeEnabled(), reserveCPU, reserveMemMiB, h.bridge.AutoSizeMinMemoryMiB())
 		m.logger.Info("updating maxRunners",
 			"scaleSet", h.bridge.ScaleSetName(),
 			"share", share,
@@ -495,9 +495,9 @@ func (m *Manager) recomputeScaleSetShares(ctx context.Context) {
 // subtracted: its machine is already missing from workerCap, so subtracting
 // the VM too would take a second, idle worker out of the share for as long as
 // it drains (BAE-13738).
-func scaleSetShare(workers []orchard.Worker, othersVMs []orchard.VM, labels map[string]string, autoSize bool, reserveCPU, reserveMemMiB uint64) (share, workerCap, othersActive int) {
-	workerCap = workerCapacityFn(autoSize, reserveCPU, reserveMemMiB)(workers, labels)
-	counted := workerCountedFn(autoSize, reserveCPU, reserveMemMiB, workers)
+func scaleSetShare(workers []orchard.Worker, othersVMs []orchard.VM, labels map[string]string, autoSize bool, reserveCPU, reserveMemMiB, minMemMiB uint64) (share, workerCap, othersActive int) {
+	workerCap = workerCapacityFn(autoSize, reserveCPU, reserveMemMiB, minMemMiB)(workers, labels)
+	counted := workerCountedFn(autoSize, reserveCPU, reserveMemMiB, minMemMiB, workers)
 	for _, vm := range othersVMs {
 		if vm.Status == orchard.VMStatusStopped || vm.Status == orchard.VMStatusFailed {
 			continue
@@ -517,12 +517,12 @@ func scaleSetShare(workers []orchard.Worker, othersVMs []orchard.VM, labels map[
 // true when the worker contributes to the scale set's capacity. workers must
 // be the same live set passed to the capacity function, because AutoSize
 // eligibility depends on pin-label uniqueness across it.
-func workerCountedFn(autoSize bool, reserveCPU, reserveMemMiB uint64, workers []orchard.Worker) func(orchard.Worker) bool {
+func workerCountedFn(autoSize bool, reserveCPU, reserveMemMiB, minMemMiB uint64, workers []orchard.Worker) func(orchard.Worker) bool {
 	if autoSize {
 		cpu, mem := brdg.AutoSizeReserves(reserveCPU, reserveMemMiB)
 		pinCounts := brdg.PinCounts(workers)
 		return func(w orchard.Worker) bool {
-			return brdg.AutoSizeExclusionReason(w, pinCounts, cpu, mem) == ""
+			return brdg.AutoSizeExclusionReason(w, pinCounts, cpu, mem, minMemMiB) == ""
 		}
 	}
 	return brdg.WorkerSchedulable
@@ -532,13 +532,14 @@ func workerCountedFn(autoSize bool, reserveCPU, reserveMemMiB uint64, workers []
 // sum of tart-vms slots over the AutoSize-eligible workers when AutoSize is on
 // (each VM takes one slot and is sized as its worker's share, so a worker
 // advertising no slot count counts as one; workers below the reserves or the
-// multi-slot floors are left out so they are not reported as schedulable), or
-// sum of tart-vms slots over every schedulable worker otherwise.
-func workerCapacityFn(autoSize bool, reserveCPU, reserveMemMiB uint64) func([]orchard.Worker, map[string]string) int {
+// multi-slot floors are left out so they are not reported as schedulable, and
+// so are workers below minMemMiB when it is set), or sum of tart-vms slots over
+// every schedulable worker otherwise.
+func workerCapacityFn(autoSize bool, reserveCPU, reserveMemMiB, minMemMiB uint64) func([]orchard.Worker, map[string]string) int {
 	if autoSize {
 		cpu, mem := brdg.AutoSizeReserves(reserveCPU, reserveMemMiB)
 		return func(workers []orchard.Worker, labels map[string]string) int {
-			return brdg.SlotCountForLabels(workers, labels, cpu, mem)
+			return brdg.SlotCountForLabels(workers, labels, cpu, mem, minMemMiB)
 		}
 	}
 	return brdg.CapacityForLabels

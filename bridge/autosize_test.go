@@ -75,7 +75,7 @@ func TestAutoSizeExclusionReason(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := AutoSizeExclusionReason(tc.worker, tc.counts, 4, 4096); got != tc.want {
+			if got := AutoSizeExclusionReason(tc.worker, tc.counts, 4, 4096, 0); got != tc.want {
 				t.Errorf("AutoSizeExclusionReason = %q, want %q", got, tc.want)
 			}
 		})
@@ -92,7 +92,7 @@ func TestWorkerCountForLabels_RenamedWorkerIsCounted(t *testing.T) {
 		mkWorker("BreakAwySFMini2.localdomain", 10, 32768, 1, nil),
 		mkWorker("BA-Zoom-Mac-Mini.local", 10, 32768, 1, nil),
 	}
-	if got := WorkerCountForLabels(workers, nil, 4, 4096); got != 3 {
+	if got := WorkerCountForLabels(workers, nil, 4, 4096, 0); got != 3 {
 		t.Errorf("WorkerCountForLabels = %d, want 3 (renamed worker must still count)", got)
 	}
 }
@@ -107,7 +107,7 @@ func TestWorkerCountForLabels_DuplicateLiveLabelsExcludeAllHolders(t *testing.T)
 		mkRenamedWorker("mini-b", "shared", 10, 32768, now, nil),
 		mkWorker("c", 10, 32768, 1, nil),
 	}
-	if got := WorkerCountForLabels(workers, nil, 4, 4096); got != 1 {
+	if got := WorkerCountForLabels(workers, nil, 4, 4096, 0); got != 1 {
 		t.Errorf("WorkerCountForLabels = %d, want 1 (both holders of the shared label excluded)", got)
 	}
 }
@@ -123,10 +123,10 @@ func TestWorkerCountForLabels_StaleDuplicateDoesNotBlockLiveWorker(t *testing.T)
 		mkRenamedWorker("BreakAway-SF-Mac-Mini-1.local", "BreakAwySFMini1.localdomain", 10, 32768, now.Add(-5*time.Second), nil),
 	}
 	live := LiveWorkers(all, DefaultWorkerStaleAfter, now)
-	if got := WorkerCountForLabels(live, nil, 4, 4096); got != 1 {
+	if got := WorkerCountForLabels(live, nil, 4, 4096, 0); got != 1 {
 		t.Fatalf("WorkerCountForLabels(live) = %d, want 1", got)
 	}
-	free := freeAutoSizeSlots(live, nil, nil, 4, 4096, 0)
+	free := freeAutoSizeSlots(live, nil, nil, 4, 4096, 0, 0)
 	if len(free) != 1 || free[0].Name != "BreakAway-SF-Mac-Mini-1.local" {
 		t.Errorf("freeAutoSizeSlots = %+v, want the live renamed worker", free)
 	}
@@ -145,7 +145,7 @@ func TestFreeAutoSizeSlots_ScheduledVMMapsBackToPinIdentity(t *testing.T) {
 		Status: orchard.VMStatusRunning,
 		Labels: map[string]string{PinLabelKey: "BreakAwySFMini1.localdomain"},
 	}}
-	free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0)
+	free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0, 0)
 	if len(free) != 1 || free[0].Name != "b" {
 		t.Errorf("freeAutoSizeSlots = %+v, want only [b]", free)
 	}
@@ -164,7 +164,7 @@ func TestFreeAutoSizeSlots_PendingVMMatchedByPinLabel(t *testing.T) {
 		Status: orchard.VMStatusCreating,
 		Labels: map[string]string{PinLabelKey: "BreakAwySFMini1.localdomain"},
 	}}
-	free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0)
+	free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0, 0)
 	if len(free) != 1 || free[0].Name != "b" {
 		t.Errorf("freeAutoSizeSlots = %+v, want only [b]", free)
 	}
@@ -187,13 +187,13 @@ func TestFreeAutoSizeSlots_VMOnRenamedWorkersOldNameStillBlocks(t *testing.T) {
 		Status: orchard.VMStatusRunning,
 		Labels: map[string]string{PinLabelKey: "BreakAwySFMini1.localdomain"},
 	}}
-	if free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0); len(free) != 0 {
+	if free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0, 0); len(free) != 0 {
 		t.Errorf("freeAutoSizeSlots = %+v, want none (VM under the old Name still holds the pin identity)", free)
 	}
 
 	// Once that VM is gone the renamed worker is free again.
 	vms[0].Status = orchard.VMStatusStopped
-	if free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0); len(free) != 1 {
+	if free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0, 0); len(free) != 1 {
 		t.Errorf("freeAutoSizeSlots = %+v, want the renamed worker once the VM stopped", free)
 	}
 }
@@ -243,7 +243,7 @@ func TestWorkerCountForLabels(t *testing.T) {
 		// missing pin label — ineligible
 		{Name: "d", Labels: map[string]string{"class": "fat"}, Resources: map[string]uint64{resourceLogicalCores: 10, resourceMemoryMiB: 16384}},
 	}
-	got := WorkerCountForLabels(workers, map[string]string{"class": "fat"}, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB)
+	got := WorkerCountForLabels(workers, map[string]string{"class": "fat"}, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB, 0)
 	if got != 2 {
 		t.Errorf("WorkerCountForLabels = %d, want 2 (a + b; d lacks pin label)", got)
 	}
@@ -258,7 +258,7 @@ func TestWorkerCountForLabels_ExcludesUndersizedWorkers(t *testing.T) {
 		// 10 cores > reserveCPU(4): schedulable.
 		mkWorker("b", 10, 32768, 1, map[string]string{"class": "fat"}),
 	}
-	got := WorkerCountForLabels(workers, map[string]string{"class": "fat"}, 4, DefaultAutoSizeReserveMemoryMiB)
+	got := WorkerCountForLabels(workers, map[string]string{"class": "fat"}, 4, DefaultAutoSizeReserveMemoryMiB, 0)
 	if got != 1 {
 		t.Errorf("WorkerCountForLabels = %d, want 1 (only b; a has cores == reserve)", got)
 	}
@@ -278,7 +278,7 @@ func TestFreeAutoSizeSlots_ExcludesAssigned(t *testing.T) {
 		{Name: "manual", Worker: "c", Status: orchard.VMStatusRunning},
 	}
 
-	free := freeAutoSizeSlots(workers, vms, nil, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB, 0)
+	free := freeAutoSizeSlots(workers, vms, nil, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB, 0, 0)
 	gotNames := make([]string, len(free))
 	for i, w := range free {
 		gotNames[i] = w.Name
@@ -301,7 +301,7 @@ func TestFreeAutoSizeSlots_ExcludesPendingPinned(t *testing.T) {
 			Labels: map[string]string{PinLabelKey: "a"},
 		},
 	}
-	free := freeAutoSizeSlots(workers, vms, nil, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB, 0)
+	free := freeAutoSizeSlots(workers, vms, nil, DefaultAutoSizeReserveCPU, DefaultAutoSizeReserveMemoryMiB, 0, 0)
 	if len(free) != 1 || free[0].Name != "b" {
 		t.Errorf("freeAutoSizeSlots = %+v, want only [b]", free)
 	}
@@ -666,7 +666,7 @@ func TestAutoSizeExclusionReason_Slots(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := AutoSizeExclusionReason(tc.worker, map[string]int{"w": 1}, 4, 4096)
+			got := AutoSizeExclusionReason(tc.worker, map[string]int{"w": 1}, 4, 4096, 0)
 			if got != tc.want {
 				t.Errorf("AutoSizeExclusionReason = %q, want %q", got, tc.want)
 			}
@@ -801,7 +801,7 @@ func TestFreeAutoSizeSlots(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := workerNames(freeAutoSizeSlots(tc.workers, tc.vms, nil, 4, 4096, 0))
+			got := workerNames(freeAutoSizeSlots(tc.workers, tc.vms, nil, 4, 4096, 0, 0))
 			if !equalStrings(got, tc.want) {
 				t.Errorf("freeAutoSizeSlots = %v, want %v", got, tc.want)
 			}
@@ -861,7 +861,7 @@ func sizedVM(vm orchard.VM, cpu, memMiB uint64) orchard.VM {
 func TestFreeAutoSizeSlots_OversizedExistingVMHoldsTheWholeHost(t *testing.T) {
 	workers := []orchard.Worker{slotWorker("w", 18, 65536, 2)}
 	vms := []orchard.VM{sizedVM(managedVM("aaaaaaaa", "w", orchard.VMStatusRunning, "w"), 14, 61440)}
-	if free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0); len(free) != 0 {
+	if free := freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0, 0); len(free) != 0 {
 		t.Errorf("freeAutoSizeSlots = %v, want none (the existing VM already takes the whole host)", workerNames(free))
 	}
 }
@@ -869,7 +869,7 @@ func TestFreeAutoSizeSlots_OversizedExistingVMHoldsTheWholeHost(t *testing.T) {
 func TestFreeAutoSizeSlots_SharedSizeExistingVMLeavesTheSecondSlot(t *testing.T) {
 	workers := []orchard.Worker{slotWorker("w", 18, 65536, 2)}
 	vms := []orchard.VM{sizedVM(managedVM("aaaaaaaa", "w", orchard.VMStatusRunning, "w"), 7, 30720)}
-	if got := workerNames(freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0)); !equalStrings(got, []string{"w"}) {
+	if got := workerNames(freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0, 0)); !equalStrings(got, []string{"w"}) {
 		t.Errorf("freeAutoSizeSlots = %v, want [w] (one 7 CPU / 30720 MiB share still fits)", got)
 	}
 }
@@ -914,7 +914,7 @@ func TestFreeAutoSizeSlots_ResourceFit(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			workers := []orchard.Worker{slotWorker("w", 18, 65536, 2)}
-			if got := len(freeAutoSizeSlots(workers, tc.vms, nil, 4, 4096, 0)); got != tc.want {
+			if got := len(freeAutoSizeSlots(workers, tc.vms, nil, 4, 4096, 0, 0)); got != tc.want {
 				t.Errorf("free slots = %d, want %d", got, tc.want)
 			}
 		})
@@ -923,11 +923,11 @@ func TestFreeAutoSizeSlots_ResourceFit(t *testing.T) {
 
 func TestFreeAutoSizeSlots_SingleSlotIgnoresSizes(t *testing.T) {
 	workers := []orchard.Worker{slotWorker("w", 18, 65536, 1)}
-	if got := len(freeAutoSizeSlots(workers, nil, nil, 4, 4096, 0)); got != 1 {
+	if got := len(freeAutoSizeSlots(workers, nil, nil, 4, 4096, 0, 0)); got != 1 {
 		t.Errorf("empty single-slot worker: free slots = %d, want 1", got)
 	}
 	vms := []orchard.VM{sizedVM(managedVM("aaaaaaaa", "w", orchard.VMStatusRunning, "w"), 1, 512)}
-	if got := len(freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0)); got != 0 {
+	if got := len(freeAutoSizeSlots(workers, vms, nil, 4, 4096, 0, 0)); got != 0 {
 		t.Errorf("single-slot worker with a tiny VM: free slots = %d, want 0", got)
 	}
 }
@@ -946,7 +946,7 @@ func TestFreeAutoSizeSlots_CursorRotatesWorkersBeforeExpandingSlots(t *testing.T
 		{3, []string{"b", "a", "a"}},
 	}
 	for _, tc := range tests {
-		if got := workerNames(freeAutoSizeSlots(workers, nil, nil, 4, 4096, tc.cursor)); !equalStrings(got, tc.want) {
+		if got := workerNames(freeAutoSizeSlots(workers, nil, nil, 4, 4096, 0, tc.cursor)); !equalStrings(got, tc.want) {
 			t.Errorf("cursor %d: freeAutoSizeSlots = %v, want %v", tc.cursor, got, tc.want)
 		}
 	}
@@ -969,10 +969,10 @@ func TestSlotCountForLabels(t *testing.T) {
 	}
 	workers[2].Labels["class"] = "fat"
 
-	if got := SlotCountForLabels(workers, fat, 4, 4096); got != 4 {
+	if got := SlotCountForLabels(workers, fat, 4, 4096, 0); got != 4 {
 		t.Errorf("SlotCountForLabels = %d, want 4 (one 1 + two 2 + none 1; thin, tiny, paused, unlabeled and both duplicate-pin workers left out)", got)
 	}
-	if got := WorkerCountForLabels(workers, fat, 4, 4096); got != 3 {
+	if got := WorkerCountForLabels(workers, fat, 4, 4096, 0); got != 3 {
 		t.Errorf("WorkerCountForLabels = %d, want 3 workers, not slots", got)
 	}
 }
